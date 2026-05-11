@@ -103,6 +103,24 @@ L/C hints are quantitative once M5 builds the memory table; pre-M5
 they're rough percentage-of-travel anchors that prevent the algorithm
 from spending the first 30 s sweeping infeasible regions.
 
+### 2.1 Monotonicity sanity check
+
+A diagnostic invariant the algorithm — and the operator scrolling
+through saved slots — can use to spot bad data:
+
+> **Lower bands should need more L and C; higher bands less.** A 10 m
+> slot with more inductance than the 80 m slot is almost certainly
+> wrong (operator saved an out-of-band carrier, encoder slipped,
+> memory got corrupted).
+
+This is a direct consequence of `X_L = ωL` and `X_C = 1/ωC`: at a
+fixed reactance target, lower frequency demands proportionally more
+inductance and more capacitance. The hybrid algorithm (Proposal D)
+should flag a violation as `status level:warn code:cal_missing` (or
+a new `code:memory_sanity`) when recall produces a slot that breaks
+the monotonic ordering against its neighbours; operator confirms
+before the slot is used.
+
 ---
 
 ## 3. Four candidate algorithm strategies
@@ -246,6 +264,7 @@ revisit-able later without firmware impact.
 | `tune_power_w`         | 5 W     | Recommended low-power TX during the iterate loop.           |
 | `measure_window_ms`    | 500     | Averaging window for AD8302 / AD8307 samples per key-down.  |
 | `coarse_search_grid`   | 4 × 4   | Fallback only — if analytic seed converges, never used.     |
+| `max_iterations`       | 30      | Hill-climb watchdog cap. On trip → escape hatch (§4.1).     |
 
 These land in `deploy/config.example.toml` at M3 and get refined
 during M5 commissioning.
@@ -263,6 +282,49 @@ during M5 commissioning.
 If any path systematically exceeds these in commissioning, the
 detector calibration or the per-band hint table is wrong — fix the
 data, not the algorithm.
+
+### 4.1 Fallback escape hatch — the manual procedure as the safety net
+
+Every fancy seed eventually fails on someone's installation.
+Detector miscalibration, an unexpected reactive load, a Doublet
+length we didn't anticipate — when the analytic seed plus
+hill-climb refine *both* fail to converge within
+`max_iterations` (default 30), Proposal D degrades to the
+**classical manual L-tuner procedure** as the worst-case fallback:
+
+```
+hill-climb watchdog trips
+        │
+        ▼
+master → controller: set_bypass true + move_l(0) + move_c(0)
+                                          ↑ reset to L=min, C=min
+                                            (= the manual "step 2" seed)
+        │
+        ▼
+side := per-band hint (try Lo-Z first if band-ambiguous)
+run a coarse_search_grid (4 × 4 default) over (L_steps, C_steps)
+    keying TX briefly at each grid point, recording SWR
+pick the best cell → hill-climb within it
+        │
+        ▼
+        ├─ converges → save slot, log status warn:cal_missing
+        │                 (best slot found *despite* analytic failing — flag
+        │                  for detector recalibration during next maintenance)
+        └─ still fails → status error:cal_missing; refuse engage;
+                         prompt operator to try the other side or
+                         home + retry manually
+```
+
+This is exactly what an operator does with a manual tuner: start
+from minimum, hunt for the SWR dip, alternate axes. It is slow (10
+– 30 s) and key-cycles audibly, but it is **guaranteed** to find a
+match if one exists in the (L, C, side) space — because it explicit
+ly scans the space rather than trusting any model.
+
+The escape hatch must never be the *common* path — if it fires more
+than once in any week of normal operation, the detector chain or
+the calibration curves need attention, not the algorithm. M5
+commissioning logs every escape-hatch invocation in the journal.
 
 ---
 
