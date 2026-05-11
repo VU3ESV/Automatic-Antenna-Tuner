@@ -12,12 +12,15 @@ namespace {
 }
 
 bool Snapshot::differs(const Snapshot& o) const {
-    if (l_steps != o.l_steps) return true;
-    if (c_steps != o.c_steps) return true;
-    if (l_enc   != o.l_enc)   return true;
-    if (c_enc   != o.c_enc)   return true;
-    if (side    != o.side)    return true;
-    if (bypass  != o.bypass)  return true;
+    if (l_steps      != o.l_steps)      return true;
+    if (c_steps      != o.c_steps)      return true;
+    if (l_enc        != o.l_enc)        return true;
+    if (c_enc        != o.c_enc)        return true;
+    if (side         != o.side)         return true;
+    if (bypass       != o.bypass)       return true;
+    if (moving       != o.moving)       return true;
+    if (homed        != o.homed)        return true;
+    if (last_move_ms != o.last_move_ms) return true;
 
     if (std::fabs(fwd_w   - o.fwd_w)   > POWER_DEADBAND) return true;
     if (std::fabs(rev_w   - o.rev_w)   > POWER_DEADBAND) return true;

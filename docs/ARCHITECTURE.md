@@ -377,6 +377,67 @@ Both produce identical operational behaviour on the wire — they just
 have different libraries underneath. The choice is the operator's, and
 it can be revisited without source-code changes.
 
+#### 5.1.3 HAL backend strategy (sim today, drivers next)
+
+The same `hal/` directory holds two parallel sets of backend
+implementations: a **simulation** backend that compiles on every target
+and runs on the bench without any wired peripherals, and the
+target-specific driver backends that land at M1b.2 hardware
+integration. Application code (`src/app/`) and the protocol layer
+(`tuner_server.cpp`) link only against the namespaces declared in
+[`hal/hal.h`](../firmware/tuner-controller/src/hal/hal.h) and have no
+knowledge of which backend is wired underneath.
+
+| Namespace        | Sim today (M1b.2 software half)           | Real driver next (M1b.2 hardware half)                |
+|------------------|-------------------------------------------|--------------------------------------------------------|
+| `hal::motor`     | `motor_sim.cpp` — virtual stepper, advances kStepsPerTick toward target each `motor::tick()`. | TMC2209 UART driver behind `TARGET_TEENSY41`; step pulses via FlexTimer / DMA. |
+| `hal::encoder`   | `encoder_sim.cpp` — couples count to motor position 1:1. | Hardware QEI (Teensy XBAR + TMR; STM32 TIM encoder mode). |
+| `hal::relay`     | `relay_sim.cpp` — pure state.             | GPIO → opto-isolated MOSFET → HV bias.                |
+| `hal::safety`    | `safety_sim.cpp` — operator-injected Fwd W. | AD8307 fwd channel ADC sample compared to threshold. |
+
+The swap-in path at M1b.2 hardware integration is:
+
+1. Add `motor_teensy41.cpp` under `TARGET_TEENSY41` gating; remove the
+   sim source from the build (or keep both behind a compile-time
+   `TUNER_HW_BACKEND` flag for A/B testing).
+2. Repeat for `encoder`, `relay`, `safety`.
+3. Native test target keeps using the sim files — host-side unit tests
+   in `test/test_motion_native/` continue to validate the verb-accept
+   matrix and the RF lockout path on every CI run.
+
+The portability rule still holds: real driver files live under their
+own `#ifdef TARGET_*` block, and the STM32H743 fallback at Phase 2 is
+a parallel `motor_stm32h7.cpp` etc. — no application changes required.
+
+**End-to-end against the sim today:**
+
+```
+browser ── /ws WS frame ──► master/hub ──► forwarding handler
+                                              │
+                                              ▼
+                                      tunerclient.Send()
+                                              │
+                                          line-JSON :8089
+                                              ▼
+            Teensy 4.1 ── tuner_server::dispatch ──► app::motion
+                                                          │
+                                                          ▼
+                                              hal::motor / encoder /
+                                              relay / safety (sim)
+                                                          │
+                          state.differs() ◄──── app::motion::tick(now, snapshot)
+                                  │
+                                  ▼
+                       tuner_server::publish → broadcast on every
+                       client TCP connection (master is one of them)
+                                              │
+                                              ▼
+                   tunerclient.handleFrame() → state.Core.UpdateState
+                                              │
+                                              ▼
+                          hub fan-out ──► every connected browser
+```
+
 ### 5.2 Encoder strategy (incremental default, absolute optional)
 
 The position-feedback contract from [`../CLAUDE.md`](../CLAUDE.md)
@@ -489,16 +550,24 @@ a 2000 CPR encoder, ~0.25 % of one revolution), the controller:
 One process, four goroutines, one shared state — same shape as
 LP-100A-Server:
 
-| Goroutine          | Responsibility                                                                                |
-|--------------------|------------------------------------------------------------------------------------------------|
-| `tuner-client`     | Maintains the WS connection to the tuner controller. Auto-reconnect with 1 s → 30 s backoff.  |
-| `cat-poller`       | Polls the transceiver for QRG every `cat.poll_ms` (default 200 ms). Emits `qrg` events.       |
-| `encoder-reader`   | Reads the two ANO encoders via GPIO; debounces; emits nudge/save events.                       |
-| `hub`              | WS server at `/ws` for the embedded web UI; fans out unified state to all browser/touch clients.|
+| Goroutine          | Status   | Responsibility                                                                                |
+|--------------------|----------|------------------------------------------------------------------------------------------------|
+| `tuner-client`     | **✅ M1b.1** | Maintains the TCP line-JSON connection to the tuner controller. Auto-reconnect with 1 s → 30 s backoff. Decodes inbound frames; `Send(Command)` for outbound verbs. |
+| `cat-poller`       | M3       | Polls the transceiver for QRG every `cat.poll_ms` (default 200 ms). Emits `qrg` events.       |
+| `encoder-reader`   | M3       | Reads the two ANO encoders via GPIO; debounces; emits nudge/save events.                       |
+| `hub`              | **✅ M1a + M1b.2** | WS server at `/ws` for the embedded web UI; fans out unified state to all browser/touch clients. Browser commands are forwarded to the controller via `tunerclient.Send()` through the `forwardingHandler` constructed in `main.go`. |
 
 Plus the embedded HTTP server (`/`, `/ws`, `/healthz`, `/api/config`,
 `/api/log-level`) serving the same kind of static UI bundle as
-LP-100A-Server.
+LP-100A-Server. `/api/log-level` is M6 hardening; `/healthz` and
+`/api/config` are live now.
+
+**Browser warm-start.** When a new WS client connects, the hub
+immediately writes the latest `state`, `telemetry`, *and* a synthesised
+`status` frame carrying the current controller-link state. Without the
+status frame, a browser that opens *after* the controller is already
+connected would never receive a link-state transition event and its
+pill would stay red.
 
 ```
    ┌── Pi GPIO ──┐    ┌── USB ───────────┐   ┌── Ethernet ──────┐
@@ -562,6 +631,13 @@ Plain HTML/JS, served from `go:embed`, no SPA framework. Three views:
 
 The Adafruit ANO encoders drive the *same* state the web UI mutates; both
 are equal first-class inputs.
+
+**Status (2026-05-11):** Operate is a single-page layout today,
+combining the live SWR/|Z|/∠Z/R/X panels with a control strip
+(±10/±100/±1000 step nudges per axis, Hi-Z/Lo-Z, bypass engage/release,
+re-home, fake-Fwd-W injector, last-ack readout). The "Tune" / "Save"
+buttons and the dedicated Memory and Setup tabs ship in M3 alongside
+the CAT poller and SQLite memory store.
 
 ## 6. Failure modes
 

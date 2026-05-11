@@ -37,10 +37,33 @@
     .row > .panel { flex: 1; min-width: 180px; margin-top: 1em; }
     code   { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
     .ago   { color: var(--muted); font-size: 0.8em; margin-left: 0.5em; }
+
+    .op-row { display: flex; align-items: center; gap: 0.5em; flex-wrap: wrap;
+              margin-top: 0.5em; }
+    .op-row > .op-label { color: var(--muted); min-width: 4em; font-size: 0.85em; }
+    button.op {
+      background: #222; color: var(--fg); border: 1px solid var(--border);
+      border-radius: 0.25em; padding: 0.4em 0.7em; font-family: inherit;
+      font-size: 0.9em; cursor: pointer; font-variant-numeric: tabular-nums;
+    }
+    button.op:hover  { background: #2c2c2c; }
+    button.op:active { background: #3a3a3a; }
+    button.op.on     { background: var(--green); border-color: #2a9a4a; }
+    button.op[disabled] { opacity: 0.4; cursor: not-allowed; }
+    button.op.danger { background: var(--red); border-color: #a32f2f; }
+    .ack-line { color: var(--muted); font-size: 0.8em; margin-top: 0.75em;
+                font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+    .ack-line.ok  { color: #6fc88a; }
+    .ack-line.err { color: #e26e6e; }
+    input.op-num {
+      background: #222; color: var(--fg); border: 1px solid var(--border);
+      border-radius: 0.25em; padding: 0.3em 0.4em; width: 5em;
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    }
   </style>
 </head>
 <body>
-  <h1>Automatic Antenna Tuner <span class="stage">M1</span></h1>
+  <h1>Automatic Antenna Tuner <span class="stage">M1b</span></h1>
 
   <div>
     Master:     <span id="ws"  class="pill yellow">connecting</span>
@@ -89,10 +112,60 @@
     <div class="med"><span id="qrg">—</span> Hz <span class="ago" id="qrgmode">—</span></div>
   </div>
 
+  <div class="panel">
+    <div class="label">Operate
+      <span class="ago">moving:<span id="moving">—</span> · homed:<span id="homed">—</span></span>
+    </div>
+
+    <div class="op-row">
+      <span class="op-label">L</span>
+      <button class="op" data-axis="l" data-delta="-1000">−1000</button>
+      <button class="op" data-axis="l" data-delta="-100">−100</button>
+      <button class="op" data-axis="l" data-delta="-10">−10</button>
+      <button class="op" data-axis="l" data-delta="10">+10</button>
+      <button class="op" data-axis="l" data-delta="100">+100</button>
+      <button class="op" data-axis="l" data-delta="1000">+1000</button>
+    </div>
+    <div class="op-row">
+      <span class="op-label">C</span>
+      <button class="op" data-axis="c" data-delta="-1000">−1000</button>
+      <button class="op" data-axis="c" data-delta="-100">−100</button>
+      <button class="op" data-axis="c" data-delta="-10">−10</button>
+      <button class="op" data-axis="c" data-delta="10">+10</button>
+      <button class="op" data-axis="c" data-delta="100">+100</button>
+      <button class="op" data-axis="c" data-delta="1000">+1000</button>
+    </div>
+
+    <div class="op-row">
+      <span class="op-label">Side</span>
+      <button class="op" id="side-hi" data-side="hi_z">Hi-Z</button>
+      <button class="op" id="side-lo" data-side="lo_z">Lo-Z</button>
+    </div>
+
+    <div class="op-row">
+      <span class="op-label">Bypass</span>
+      <button class="op" id="bypass-on"  data-bypass="true">Engage</button>
+      <button class="op" id="bypass-off" data-bypass="false">Bypass off</button>
+    </div>
+
+    <div class="op-row">
+      <span class="op-label">Home</span>
+      <button class="op" id="home-btn">Re-home both axes</button>
+    </div>
+
+    <div class="op-row">
+      <span class="op-label">Fake Fwd W</span>
+      <input id="fakefwd" class="op-num" type="number" step="0.1" min="0" value="0">
+      <button class="op danger" id="fakefwd-btn">Inject (test RF lockout)</button>
+    </div>
+
+    <div id="ack" class="ack-line">no acks yet</div>
+  </div>
+
   <p style="color: var(--muted); margin-top: 2em;">
-    M1 scaffold — synthetic telemetry from <code>fakecontroller</code>.
-    Real controller link arrives mid-M1 once the firmware has its WS
-    server. See <code>docs/PLAN.md</code>.
+    M1b scaffold — sim HAL on the controller. Real motors / encoders /
+    relays land under M1b.2 hardware integration.
+    See <code>docs/PLAN.md</code>.
   </p>
 
   <script>
@@ -105,14 +178,61 @@
       el.textContent = text;
     }
 
+    let activeWS = null;
+    let cmdSeq = 0;
+    function sendCmd(action, args) {
+      if (!activeWS || activeWS.readyState !== WebSocket.OPEN) {
+        showAck({ ok: false, err: { code: 'no_ws', msg: 'WebSocket not open' } });
+        return;
+      }
+      const id = 'c-' + (++cmdSeq);
+      activeWS.send(JSON.stringify({ type: 'command', id, action, args }));
+      showAck({ ok: 'pending', ref: id, action });
+    }
+    function showAck(a) {
+      const el = $('ack');
+      if (a.ok === 'pending') {
+        el.className = 'ack-line';
+        el.textContent = `→ ${a.action}  (${a.ref}) pending…`;
+        return;
+      }
+      if (a.ok) {
+        el.className = 'ack-line ok';
+        el.textContent = `✓ ${a.ref || ''} ok`;
+      } else {
+        const code = a.err && a.err.code || 'error';
+        const msg  = a.err && a.err.msg  || '';
+        el.className = 'ack-line err';
+        el.textContent = `✗ ${a.ref || ''} ${code}${msg ? ': ' + msg : ''}`;
+      }
+    }
+
+    document.querySelectorAll('button.op[data-axis]').forEach(b => {
+      b.addEventListener('click', () => {
+        const verb = b.dataset.axis === 'l' ? 'move_l' : 'move_c';
+        sendCmd(verb, { delta_steps: parseInt(b.dataset.delta, 10) });
+      });
+    });
+    $('side-hi').addEventListener('click', () => sendCmd('set_side', { side: 'hi_z' }));
+    $('side-lo').addEventListener('click', () => sendCmd('set_side', { side: 'lo_z' }));
+    $('bypass-on').addEventListener('click',  () => sendCmd('set_bypass', { bypass: true  }));
+    $('bypass-off').addEventListener('click', () => sendCmd('set_bypass', { bypass: false }));
+    $('home-btn').addEventListener('click',   () => sendCmd('home', {}));
+    $('fakefwd-btn').addEventListener('click', () => {
+      const w = parseFloat($('fakefwd').value || '0');
+      sendCmd('set_fwd_w', { w });
+    });
+
     function connect() {
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
       const ws = new WebSocket(proto + '://' + location.host + '/ws');
+      activeWS = ws;
       let lastSeq = 0;
 
       ws.onopen = () => setPill($('ws'), 'green', 'connected');
       ws.onclose = () => {
         setPill($('ws'), 'red', 'disconnected');
+        activeWS = null;
         setTimeout(connect, 1000);
       };
       ws.onerror = e => console.warn('ws error', e);
@@ -147,7 +267,14 @@
             $('lenc').textContent   = fmtI(d.l_enc);
             $('cenc').textContent   = fmtI(d.c_enc);
             $('side').textContent   = d.side || '—';
-            $('bypass').textContent = d.bypass ? 'engaged' : 'engaged-out';
+            $('bypass').textContent = d.bypass ? 'engaged' : 'out';
+            $('moving').textContent = d.moving ? 'yes' : 'no';
+            $('homed').textContent  = d.homed  ? 'yes' : 'no';
+            // Highlight the active side / bypass buttons.
+            $('side-hi').classList.toggle('on', d.side === 'hi_z');
+            $('side-lo').classList.toggle('on', d.side === 'lo_z');
+            $('bypass-on').classList.toggle('on', d.bypass === true);
+            $('bypass-off').classList.toggle('on', d.bypass === false);
             break;
           }
           case 'qrg': {
@@ -167,8 +294,10 @@
             setPill($('ctl'), cls, s || 'unknown');
             break;
           }
-          case 'heartbeat':
           case 'ack':
+            showAck({ ok: f.ok, ref: f.ref, err: f.err });
+            break;
+          case 'heartbeat':
           case 'memory':
             break;
           default:

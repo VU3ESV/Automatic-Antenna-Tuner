@@ -15,6 +15,7 @@
 
 #include <Arduino.h>
 
+#include "app/motion.h"
 #include "app/state.h"
 #include "hal/hal.h"
 #include "net_hal.h"
@@ -116,8 +117,10 @@ void setup() {
     }
     Serial.println();
 
-    snapshot.bypass = true;  // invariant #2: bypass on power-up.
-    snapshot.side   = app::Side::HiZ;
+    // Wake the HAL: motor sim, encoders, relays, safety. Bypass + Hi-Z
+    // are the post-init defaults (invariant #2). The first motion::tick()
+    // below populates the snapshot from HAL state.
+    app::motion::init();
 }
 
 void loop() {
@@ -133,9 +136,10 @@ void loop() {
     }
 
     if (dhcpOK) {
-        // Publish the current snapshot so any state-change (when hardware
-        // wiring lands) propagates to clients. For now, the snapshot is
-        // static after boot — heartbeats keep the link alive.
+        // Rebuild the snapshot from the HAL (sim today, real drivers in
+        // M1b.2) and republish. publish() diffs against the previous
+        // snapshot so non-changes don't waste a network frame.
+        app::motion::tick(now, snapshot);
         tuner_server::publish(snapshot);
         tuner_server::tick();
     }

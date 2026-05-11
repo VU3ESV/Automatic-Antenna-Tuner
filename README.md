@@ -42,13 +42,27 @@ verbs only.
 
 ## Status
 
-**M0 done (master side), M1 software scaffold done, M1 firmware pending
-hardware.** The Go master compiles for macOS and `linux/arm64`, serves
-an embedded web UI that subscribes to `/ws` and renders live state +
-telemetry from a `fakecontroller` source. The firmware skeleton builds
-all three PlatformIO envs (`teensy41`, `nucleo_h743zi`, `native`); real
-Ethernet + WS bring-up happens when a Teensy is in hand. See
-[docs/PLAN.md](docs/PLAN.md) for the milestone-by-milestone state.
+**M1b live on the bench (simulated HAL).** End-to-end is up:
+
+- The Go master runs on a Raspberry Pi under systemd, serving the
+  embedded web UI on `:8088`.
+- A Teensy 4.1 dials in over TCP (PROTOCOL.md §1.0) and publishes
+  real `state` + `heartbeat` frames; the master fans them out to
+  every connected browser.
+- The web UI's **Operate** panel sends `move_l` / `move_c` /
+  `set_side` / `set_bypass` / `home` verbs — they hit the controller,
+  drive the simulated stepper / encoder / relay / safety HAL, and the
+  resulting state lands back on every browser within a frame.
+- The RF-lockout path is exercisable from the browser via the debug
+  `set_fwd_w` verb — set it above 5 W and motion verbs come back with
+  `ack ok:false code:rf_lockout`.
+
+Real TMC2209 drivers, hardware encoders, and vacuum relays plug in
+behind the same HAL interfaces under M1b.2 hardware integration —
+application code does not change. See [docs/PLAN.md](docs/PLAN.md)
+for the milestone-by-milestone state and
+[docs/ARCHITECTURE.md §5.1.3](docs/ARCHITECTURE.md) for the HAL backend
+swap-in path.
 
 ## Deploy the master to a Raspberry Pi
 

@@ -14,13 +14,13 @@ For the architecture this plan implements, see
 
 | M  | Name                        | Deliverable                                                                                            | Status (2026-05-11)                              |
 |----|-----------------------------|--------------------------------------------------------------------------------------------------------|--------------------------------------------------|
-| M0 | Scaffolding                 | Repo skeleton, CI, two binaries that build and exchange a heartbeat.                                   | **Master side ✅ · firmware side pending HW**    |
-| M1 | Motion + position           | Steppers move under encoder closed-loop; bypass + relay state machine; faked RF.                       | **Master software ✅ · firmware pending HW**     |
+| M0 | Scaffolding                 | Repo skeleton, CI, two binaries that build and exchange a heartbeat.                                   | **✅** (master + firmware skeleton + CI)         |
+| M1 | Motion + position           | Steppers move under encoder closed-loop; bypass + relay state machine; faked RF.                       | **M1a ✅ · M1b.1 ✅ · M1b.2 software half ✅ · M1b.2 real drivers pending HW** |
 | M2 | Measurement                 | AD8302 + dual AD8307 chains live; SWR, R, X reported in `telemetry`.                                   | Pending hardware                                  |
-| M3 | Master core + GUI           | Go master with embedded web UI, CAT polling, ANO encoders, memory store.                               | Partial — UI + WS hub done; CAT / encoders / memory pending |
+| M3 | Master core + GUI           | Go master with embedded web UI, CAT polling, ANO encoders, memory store.                               | Partial — UI + WS hub + Operate panel + command forwarding done; CAT / ANO encoders / SQLite memory pending |
 | M4 | Auto-tune algorithm         | Recall + analytic L-network solve + hill-climb fine-tune, validated on a dummy load network.           | Pending M2/M3                                     |
 | M5 | RF commissioning            | Real Doublet on-air, per-band calibration of memory, soak test.                                        | Pending hardware                                  |
-| M6 | Hardening                   | Reconnect, lockouts, log-level API, systemd unit, cross-compile to Pi, udev rules, release pipeline.   | **Pi deploy pipeline ✅** (cross-compile + install.sh + systemd + redeploy.sh); reconnect+lockouts+log-level+udev+release pending |
+| M6 | Hardening                   | Reconnect, lockouts, log-level API, systemd unit, cross-compile to Pi, udev rules, release pipeline.   | **Pi deploy pipeline ✅** (cross-compile + install.sh + systemd + redeploy.sh); reconnect ✅ (tunerclient 1s→30s backoff); log-level / udev / release pipeline pending |
 
 Numbers below assume one operator and an existing bench (scope, signal
 generator, dummy load + reactive simulator, RF wattmeter). Calendar weeks
@@ -123,10 +123,28 @@ End-to-end: Teensy → master → browser shows real controller state.
 
 #### M1b.2 — Hardware integration (motion / measurement / safety)
 
-- [ ] Add `hal::encoder`, `hal::motor`, `hal::relay`, `hal::safety`
+- [x] Add `hal::encoder`, `hal::motor`, `hal::relay`, `hal::safety`
       interfaces to the firmware HAL. Implementations for `TARGET_TEENSY41`
       gate stepper / QEI / GPIO calls; `TARGET_NATIVE` provides stubs
       so the host-side test suite keeps building.
+      *(Done 2026-05-11 with a portable **sim** backend — `motor_sim`,
+      `encoder_sim`, `relay_sim`, `safety_sim` — that compiles on every
+      target. Real driver implementations replace the sim files when the
+      hardware arrives.)*
+- [x] `app::motion` task: drives the motor sim each loop iteration,
+      rebuilds the published snapshot from the HAL, and gates every
+      motion / side / home verb on the safety lockout. 8 native unit
+      tests cover the verb-accept matrix end-to-end against the sim
+      HAL.
+- [x] Verb dispatch wired in `tuner_server`: `move_l`, `move_c`,
+      `set_side`, `set_bypass`, `home`, plus a debug `set_fwd_w` so the
+      lockout path is testable without a transmitter.
+- [x] Master `hub` → `tunerclient.Send` forwarding handler — every
+      well-formed browser command lands on the controller's wire.
+- [x] Web UI "Operate" panel: ±10/±100/±1000 step nudges per axis,
+      Hi-Z / Lo-Z toggle (auto-highlighted from `state.side`), bypass
+      engage/release, re-home button, fake-Fwd-W injector, last-ack
+      readout. Two-client smoke deferred to bench validation.
 - [ ] Wire two TMC2209 drivers to the Teensy (UART config). Pick microstep
       resolution (default 1/16) and current limit per motor spec.
 - [ ] Implement `motor` task with trapezoidal accel/decel; verify motion
@@ -144,22 +162,23 @@ End-to-end: Teensy → master → browser shows real controller state.
       Replaced by the M1b.1 TCP line-JSON transport (PROTOCOL.md §1.0).
       WebSocket framing upgrade is deferred to M6 hardening; the JSON
       payload format is unchanged.
-- [ ] Implement `set_steps` and `get_state` verbs end-to-end. Verb set for
-      M1: `move_l`, `move_c`, `home`, `set_side`, `set_bypass`, `resync`.
+- [x] Verb set for M1: `move_l`, `move_c`, `home`, `set_side`,
+      `set_bypass`, `resync`. All wired end-to-end against the sim HAL.
 - [ ] Wire vacuum relays through optoisolated MOSFET drivers + HV bias;
       implement K1/K2 mutual-exclusion + K3 override in firmware.
-- [ ] `safety` task: refuse `move_l`/`move_c`/`set_side` if fake
-      `fwd_w > tx_lockout_w` (master can set the fake via a debug verb so
-      the lockout path is testable without a transmitter).
+- [x] `safety` task: refuses `move_l`/`move_c`/`set_side`/`home` when
+      `fwd_w >= tx_lockout_w` (5 W default). Master can drive the
+      fake reading via the `set_fwd_w` debug verb so the lockout path
+      is testable without a transmitter.
 - [x] ~~Replace `internal/fakecontroller` with a real
       `internal/tunerclient` package: dial `cfg.Tuner.URL`, 1 s → 30 s
       reconnect backoff, decode inbound frames into the same
       `state.Core` interface (drop-in).~~ Done as part of M1b.1.
       `fakecontroller` retained behind `--fake-controller` flag for
       hardware-less dev.
-- [ ] Master GUI: add an "Operate" page stub with two big number panels
-      (L_steps / C_steps), bypass toggle, side toggle, and step nudge
-      buttons. Wire the two ANO encoders to nudge L and C.
+- [x] Master GUI: "Operate" panel with L/C step nudges, side toggle,
+      bypass engage, home, fake-Fwd-W injector. ANO-encoder wiring
+      moves to M3 alongside the rest of the master-input work.
 - [ ] Bench validation: drive each axis full-range, confirm encoder counts
       match expected step counts within ±1 LSB after each move; latch
       bypass on every state change.
@@ -168,6 +187,18 @@ End-to-end: Teensy → master → browser shows real controller state.
 axes from end to end via the GUI and via the ANO encoders, see live
 position update in two browsers simultaneously, and any attempt to move
 during a faked TX is refused with a visible lockout banner.
+
+**State (2026-05-11):**
+- GUI drive ✅ — Operate panel ships ±10/±100/±1000 step nudges per
+  axis, Hi-Z/Lo-Z toggle, bypass engage/release, and a "Re-home both
+  axes" button. Verified against the sim HAL on a real Teensy 4.1.
+- Two-browser sync ✅ — `state` frames fan out through `hub`; opening a
+  second tab shows the same position update within one frame.
+- Faked-TX lockout ✅ — set fake Fwd W ≥ 5 in the Operate panel and
+  every motion verb comes back as `ack ok:false code:rf_lockout`. The
+  ack readout shows the refusal inline; the lockout *banner* is M3
+  polish.
+- ANO encoders ⏳ — wired in M3 alongside CAT and memory.
 
 ---
 

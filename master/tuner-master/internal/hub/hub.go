@@ -165,10 +165,13 @@ func (c *client) deliver(e state.Event) {
 			Data state.QRGData `json:"data"`
 		}{c.hub.envelope(protocol.TypeQRG), *e.Snap.QRG})
 	case protocol.TypeStatus:
+		// Synthesised link-state notification (see PROTOCOL.md §2.5
+		// "Warm-start status"). No `code` — the connected / connecting
+		// / disconnected state lives in `msg`, and `code:link_lost`
+		// would be a misleading fault marker for the "connected" case.
 		raw, _ = json.Marshal(protocol.Status{
 			Envelope: c.hub.envelope(protocol.TypeStatus),
 			Level:    protocol.StatusInfo,
-			Code:     protocol.CodeLinkLost,
 			Msg:      string(e.Snap.ControllerLink),
 		})
 	default:
@@ -195,6 +198,16 @@ func (c *client) sendCurrentSnapshot() {
 		})
 		_ = c.write(raw)
 	}
+	// Tell the late-joining browser the current controller link state.
+	// state.SetLink only fires an Event on a *transition*, so without
+	// this a browser that opens after the controller is already
+	// connected would never see its pill turn green.
+	raw, _ := json.Marshal(protocol.Status{
+		Envelope: c.hub.envelope(protocol.TypeStatus),
+		Level:    protocol.StatusInfo,
+		Msg:      string(snap.ControllerLink),
+	})
+	_ = c.write(raw)
 }
 
 func (c *client) readLoop(ctx context.Context) {

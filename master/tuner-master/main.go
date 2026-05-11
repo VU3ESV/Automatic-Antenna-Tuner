@@ -29,6 +29,7 @@ import (
 
 	"github.com/VU3ESV/Automatic-Antenna-Tuner/master/tuner-master/internal/fakecontroller"
 	"github.com/VU3ESV/Automatic-Antenna-Tuner/master/tuner-master/internal/hub"
+	"github.com/VU3ESV/Automatic-Antenna-Tuner/master/tuner-master/internal/protocol"
 	"github.com/VU3ESV/Automatic-Antenna-Tuner/master/tuner-master/internal/state"
 	"github.com/VU3ESV/Automatic-Antenna-Tuner/master/tuner-master/internal/tunerclient"
 )
@@ -52,6 +53,22 @@ func loadConfig(path string) (Config, error) {
 	var c Config
 	_, err := toml.DecodeFile(path, &c)
 	return c, err
+}
+
+// forwardingHandler returns a hub.CommandHandler that ships every
+// browser-issued command down the wire to the tuner controller via
+// tunerclient.Send(). The hub still produces the ack frame back to the
+// browser; the controller's own ack (over TCP) is logged by tunerclient
+// but not currently relayed — the browser is told "we forwarded it",
+// not "the controller accepted it". Wiring the controller's ack
+// through to the browser is on the M6 hardening list.
+func forwardingHandler(tcl *tunerclient.Client) hub.CommandHandler {
+	return func(_ context.Context, cmd protocol.Command) (bool, protocol.StatusCode, string) {
+		if err := tcl.Send(cmd); err != nil {
+			return false, protocol.CodeLinkLost, err.Error()
+		}
+		return true, "", ""
+	}
 }
 
 func main() {
@@ -85,7 +102,28 @@ func main() {
 	}
 
 	core := state.New()
-	wsHub := hub.New(core, hub.NoopHandler, heartbeat)
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	// The hub's command handler bridges browser-issued verbs to the
+	// outbound link. With --fake-controller there is nothing
+	// downstream to send to (the fakecontroller is itself the state
+	// source), so the noop handler is correct; against the real
+	// controller every well-formed command is forwarded via
+	// tunerclient.Send().
+	var cmdHandler hub.CommandHandler = hub.NoopHandler
+
+	if !*fakeCtrl {
+		tcl := tunerclient.Run(ctx, core, tunerclient.Options{
+			Host:           cfg.Tuner.Host,
+			Port:           cfg.Tuner.Port,
+			InitialBackoff: time.Duration(cfg.Tuner.ReconnectMs) * time.Millisecond,
+		})
+		cmdHandler = forwardingHandler(tcl)
+	}
+
+	wsHub := hub.New(core, cmdHandler, heartbeat)
 
 	mux := http.NewServeMux()
 
@@ -120,25 +158,17 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-
 	var wg sync.WaitGroup
 
-	// Choose exactly one controller source.
+	// The real-controller goroutine was started earlier via
+	// tunerclient.Run so the forwarding handler can capture the client.
+	// The fakecontroller has no client to capture, so we start it here.
 	if *fakeCtrl {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			fakecontroller.Run(ctx, core)
 		}()
-	} else {
-		// Real controller: dial via TCP per PROTOCOL.md §1.0.
-		tunerclient.Run(ctx, core, tunerclient.Options{
-			Host:           cfg.Tuner.Host,
-			Port:           cfg.Tuner.Port,
-			InitialBackoff: time.Duration(cfg.Tuner.ReconnectMs) * time.Millisecond,
-		})
 	}
 
 	wg.Add(1)

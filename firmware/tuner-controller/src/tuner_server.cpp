@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <cstring>
 
+#include "app/motion.h"
 #include "app/protocol.h"
 
 namespace tuner_server {
@@ -76,37 +77,97 @@ void send_heartbeat_broadcast() {
     broadcast(frame, n);
 }
 
-// Dispatch a single parsed command. M1b accepts only the safe verbs;
-// motion / relay verbs return `ack ok:false` with `unknown_action` until
-// the HAL layers are wired.
-void dispatch(Connection &conn, const app::InboundCommand &cmd) {
+// Reply ok/err to a single command.
+void send_ack_ok(EthernetClient &c, const char *id) {
+    char ack[128];
+    int  n = app::serialize_ack_ok(ack, sizeof(ack), id);
+    send_frame(c, ack, n);
+}
+
+void send_ack_err(EthernetClient &c, const char *id,
+                  const char *code, const char *msg) {
     char ack[256];
-    int  n = 0;
+    int  n = app::serialize_ack_err(ack, sizeof(ack), id, code, msg);
+    send_frame(c, ack, n);
+}
+
+// Dispatch a single parsed command. Motion/relay/safety verbs route
+// through app::motion which enforces invariant #1 (no motion under RF).
+void dispatch(Connection &conn, const char *line, size_t line_len,
+              const app::InboundCommand &cmd) {
+    auto reply = [&](bool accepted, const app::motion::Refusal &err) {
+        if (accepted) send_ack_ok(conn.client, cmd.id);
+        else          send_ack_err(conn.client, cmd.id, err.code, err.msg);
+    };
 
     if (strcmp(cmd.action, "noop") == 0) {
-        n = app::serialize_ack_ok(ack, sizeof(ack), cmd.id);
-    } else if (strcmp(cmd.action, "resync") == 0) {
-        n = app::serialize_ack_ok(ack, sizeof(ack), cmd.id);
-        send_frame(conn.client, ack, n);
-        // Re-emit state immediately after the ack.
+        send_ack_ok(conn.client, cmd.id);
+        return;
+    }
+
+    if (strcmp(cmd.action, "resync") == 0) {
+        send_ack_ok(conn.client, cmd.id);
         send_state_to(conn.client);
         return;
-    } else if (strcmp(cmd.action, "set_bypass") == 0 ||
-               strcmp(cmd.action, "move_l")     == 0 ||
-               strcmp(cmd.action, "move_c")     == 0 ||
-               strcmp(cmd.action, "set_side")   == 0 ||
-               strcmp(cmd.action, "home")       == 0) {
-        // Verb is known but hardware is not wired yet (M1b firmware
-        // bring-up still has stepper/relay HAL pending).
-        n = app::serialize_ack_err(ack, sizeof(ack), cmd.id,
-                                   "unknown_action",
-                                   "verb known but hardware not wired (M1b in progress)");
-    } else {
-        n = app::serialize_ack_err(ack, sizeof(ack), cmd.id,
-                                   "unknown_action",
-                                   cmd.action);
     }
-    send_frame(conn.client, ack, n);
+
+    if (strcmp(cmd.action, "move_l") == 0 || strcmp(cmd.action, "move_c") == 0) {
+        int32_t value    = 0;
+        bool    is_delta = true;
+        if (!app::parse_args_move(line, line_len, value, is_delta)) {
+            send_ack_err(conn.client, cmd.id, "bad_args",
+                         "expected delta_steps or target_steps");
+            return;
+        }
+        app::motion::Refusal err = {nullptr, nullptr};
+        const bool ok = (cmd.action[5] == 'l')
+                            ? app::motion::move_l(value, is_delta, err)
+                            : app::motion::move_c(value, is_delta, err);
+        reply(ok, err);
+        return;
+    }
+
+    if (strcmp(cmd.action, "set_side") == 0) {
+        app::Side s;
+        if (!app::parse_args_set_side(line, line_len, s)) {
+            send_ack_err(conn.client, cmd.id, "bad_args",
+                         "expected side: hi_z|lo_z");
+            return;
+        }
+        app::motion::Refusal err = {nullptr, nullptr};
+        reply(app::motion::set_side(s, err), err);
+        return;
+    }
+
+    if (strcmp(cmd.action, "set_bypass") == 0) {
+        bool on = true;
+        if (!app::parse_args_set_bypass(line, line_len, on)) {
+            send_ack_err(conn.client, cmd.id, "bad_args", "expected on: bool");
+            return;
+        }
+        app::motion::Refusal err = {nullptr, nullptr};
+        reply(app::motion::set_bypass(on, err), err);
+        return;
+    }
+
+    if (strcmp(cmd.action, "home") == 0) {
+        app::motion::Refusal err = {nullptr, nullptr};
+        reply(app::motion::home(err), err);
+        return;
+    }
+
+    if (strcmp(cmd.action, "set_fwd_w") == 0) {
+        float w = 0.0f;
+        if (!app::parse_args_set_fwd_w(line, line_len, w)) {
+            send_ack_err(conn.client, cmd.id, "bad_args", "expected w: number");
+            return;
+        }
+        app::motion::Refusal err = {nullptr, nullptr};
+        reply(app::motion::set_fwd_w_fake(w, err), err);
+        return;
+    }
+
+    send_ack_err(conn.client, cmd.id, "unknown_action", cmd.action);
 }
 
 // Drain pending bytes from one client; on every '\n' parse + dispatch.
@@ -120,7 +181,7 @@ void read_one(Connection &conn) {
                 conn.rx_buf[conn.rx_len] = '\0';
                 app::InboundCommand cmd;
                 if (app::parse_command(conn.rx_buf, conn.rx_len, cmd)) {
-                    dispatch(conn, cmd);
+                    dispatch(conn, conn.rx_buf, conn.rx_len, cmd);
                 } else {
                     char ack[200];
                     int n = app::serialize_ack_err(ack, sizeof(ack), "",

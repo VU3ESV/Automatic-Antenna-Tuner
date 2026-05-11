@@ -53,4 +53,26 @@ struct InboundCommand {
 
 bool parse_command(const char *line, size_t line_len, InboundCommand &out);
 
+// Per-verb argument decoders. Each re-parses the line (cheap; JSON is
+// always < 512 bytes) and extracts only the fields its verb cares
+// about. Returns false on missing / malformed args.
+
+// move_l / move_c — sets `value` and `is_delta`. Accepts either
+// "delta_steps" (is_delta=true) or "target_steps" (is_delta=false).
+// If both are present, delta wins. Sets `is_delta=false` and returns
+// true with `value=0` for a malformed-but-present args object so the
+// dispatcher can fall through to a defaulted no-op.
+bool parse_args_move(const char *line, size_t line_len,
+                     int32_t &value, bool &is_delta);
+
+// set_side — expects {"side":"hi_z"|"lo_z"}.
+bool parse_args_set_side(const char *line, size_t line_len, Side &out);
+
+// set_bypass — expects {"on":true|false}. Also accepts {"bypass":...}
+// for tolerance.
+bool parse_args_set_bypass(const char *line, size_t line_len, bool &out);
+
+// set_fwd_w (debug verb) — expects {"w":<number>}.
+bool parse_args_set_fwd_w(const char *line, size_t line_len, float &out);
+
 } // namespace app

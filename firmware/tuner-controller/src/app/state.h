@@ -19,6 +19,12 @@ struct Snapshot {
     Side     side     = Side::HiZ;
     bool     bypass   = true;     // invariant #2: bypass on power-up.
 
+    // Motion / homing status — see docs/PROTOCOL.md §2.2.
+    bool     moving       = false;
+    bool     homed        = false;
+    // millis() value of the last completed move (0 = never moved this boot).
+    uint32_t last_move_ms = 0;
+
     // Measurements (smoothed; raw values bypass diffing).
     float fwd_w   = 0.0f;
     float rev_w   = 0.0f;

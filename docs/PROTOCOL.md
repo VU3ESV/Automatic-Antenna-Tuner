@@ -207,6 +207,14 @@ and controller emit these.
 | `cal_missing`   | Per-axis calibration absent; auto-tune disabled.        |
 | `ws_overrun`    | Client too slow; frames dropped.                        |
 
+**Warm-start status.** When a new WS client connects, the master
+synthesises a `status` frame carrying the current controller-link
+state (`connected` / `connecting` / `disconnected`) in `msg`. This is
+how a browser that opens after the controller is already connected
+learns to render its pill green — without it, the WS subscriber would
+wait forever for a non-existent transition. The synthesised frame's
+`level` is `info` and its `code` is omitted.
+
 ### 2.6 `heartbeat`
 
 Sent every `heartbeat_ms` when no other server→client frame would be
@@ -259,13 +267,14 @@ an `ack`, but with `ref: null`.
 | `move_l`     | `{ "delta_steps": int }` *or* `{ "target_steps": uint }` | controller| Refused if RF present or `bypass:false`.       |
 | `move_c`     | same shape                                        | controller| Same rules.                                           |
 | `set_side`   | `{ "side": "hi_z" \| "lo_z" }`                     | controller| Refused if RF present. Auto-engages bypass first.    |
-| `set_bypass` | `{ "bypass": bool }`                              | controller| The only relay verb accepted while RF is present.    |
+| `set_bypass` | `{ "bypass": bool }` *or* `{ "on": bool }`         | controller| The only relay verb accepted while RF is present.    |
 | `recall`     | `{ "freq_hz": uint }`                             | master    | Master expands into a sequence of controller verbs.  |
 | `save`       | `{ "freq_hz": uint, "label"?: string }`           | master    | Persists current `state` for `(band, bucket)`.       |
 | `auto_tune`  | `{ "freq_hz": uint, "power_w": float }`           | master    | Master orchestrates analytic + hill-climb.           |
 | `home`       | `{}`                                              | controller| Drives both axes to mechanical home.                 |
 | `resync`     | `{}`                                              | either    | Server re-emits current `state` + `telemetry`.       |
 | `noop`       | `{}`                                              | either    | Connection check; `ack ok:true` only.                |
+| `set_fwd_w`  | `{ "w": number }`                                 | controller| **Debug.** Injects a synthetic Fwd power reading so the RF-lockout path can be exercised without keying a transmitter. Replaced by real ADC samples once the AD8307 chain lands in M2. |
 
 "Hop" indicates where the verb is *terminated*. Browsers send all
 verbs to the master; the master forwards controller-bound verbs and

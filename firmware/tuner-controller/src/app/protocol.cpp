@@ -61,11 +61,12 @@ int serialize_state(char *out, size_t out_size, uint32_t seq,
     data["c_enc"]     = snap.c_enc;
     data["side"]      = side_str(snap.side);
     data["bypass"]    = snap.bypass;
-    // last_move / moving / homed default to neutral values until M1b
-    // hardware integration wires them up.
-    data["last_move"] = "2000-01-01T00:00:00Z";
-    data["moving"]    = false;
-    data["homed"]     = false;
+    data["moving"]    = snap.moving;
+    data["homed"]     = snap.homed;
+
+    char last_move[32];
+    synth_iso_ts(snap.last_move_ms, last_move, sizeof(last_move));
+    data["last_move"] = last_move;
 
     return serializeJson(doc, out, out_size);
 }
@@ -108,6 +109,53 @@ int serialize_ack_err(char *out, size_t out_size, const char *ref,
     err["code"] = code ? code : "unknown";
     err["msg"]  = msg ? msg  : "";
     return serializeJson(doc, out, out_size);
+}
+
+bool parse_args_move(const char *line, size_t line_len,
+                     int32_t &value, bool &is_delta) {
+    JsonDocument doc;
+    if (deserializeJson(doc, line, line_len)) return false;
+    JsonVariantConst args = doc["args"];
+    if (args.isNull()) return false;
+    if (!args["delta_steps"].isNull()) {
+        value    = args["delta_steps"].as<int32_t>();
+        is_delta = true;
+        return true;
+    }
+    if (!args["target_steps"].isNull()) {
+        value    = args["target_steps"].as<int32_t>();
+        is_delta = false;
+        return true;
+    }
+    return false;
+}
+
+bool parse_args_set_side(const char *line, size_t line_len, Side &out) {
+    JsonDocument doc;
+    if (deserializeJson(doc, line, line_len)) return false;
+    const char *s = doc["args"]["side"] | "";
+    if (strcmp(s, "hi_z") == 0) { out = Side::HiZ; return true; }
+    if (strcmp(s, "lo_z") == 0) { out = Side::LoZ; return true; }
+    return false;
+}
+
+bool parse_args_set_bypass(const char *line, size_t line_len, bool &out) {
+    JsonDocument doc;
+    if (deserializeJson(doc, line, line_len)) return false;
+    JsonVariantConst args = doc["args"];
+    if (args.isNull()) return false;
+    if (!args["on"].isNull())     { out = args["on"].as<bool>();     return true; }
+    if (!args["bypass"].isNull()) { out = args["bypass"].as<bool>(); return true; }
+    return false;
+}
+
+bool parse_args_set_fwd_w(const char *line, size_t line_len, float &out) {
+    JsonDocument doc;
+    if (deserializeJson(doc, line, line_len)) return false;
+    JsonVariantConst w = doc["args"]["w"];
+    if (w.isNull()) return false;
+    out = w.as<float>();
+    return true;
 }
 
 bool parse_command(const char *line, size_t line_len, InboundCommand &out) {
