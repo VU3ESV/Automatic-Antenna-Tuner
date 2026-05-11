@@ -13,19 +13,19 @@
 # bootstraps a fresh Pi and updates an existing one with the same
 # command.
 #
-# Configure once via env vars (export them in your shell rc, or pass
-# inline):
+# Target the Pi one of two ways:
 #
-#   PI_HOST   — hostname or IP of the Pi (e.g. "tuner-pi.local", "192.168.1.42")
-#               default: tuner-pi.local
-#   PI_USER   — SSH user (must have passwordless sudo, e.g. via /etc/sudoers.d)
-#               default: pi
-#   PI_PORT   — SSH port; default: 22
+#   1. Positional argument:   ./deploy/redeploy.sh pi@tuner-pi.local
+#                             ./deploy/redeploy.sh vinod@192.168.1.42:2222
+#      Accepts the standard SSH spec [user@]host[:port].
 #
-# Usage:
-#   ./deploy/redeploy.sh
-#   PI_HOST=192.168.1.42 PI_USER=vinod ./deploy/redeploy.sh
+#   2. Env vars:              PI_HOST, PI_USER, PI_PORT (export in your
+#                             shell rc, or pass inline). Used when no
+#                             positional arg is given.
 #
+#      defaults: PI_USER=pi  PI_HOST=tuner-pi.local  PI_PORT=22
+#
+# The Pi user must have passwordless sudo (the usual Pi default).
 # Requires: ssh, scp, sudo on the Pi.
 
 set -euo pipefail
@@ -34,9 +34,25 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 MODULE_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$MODULE_DIR"
 
+# Defaults (overridden by env vars, then by the positional arg).
 PI_HOST="${PI_HOST:-tuner-pi.local}"
 PI_USER="${PI_USER:-pi}"
 PI_PORT="${PI_PORT:-22}"
+
+# Positional arg overrides env vars: [user@]host[:port].
+if [ -n "${1:-}" ]; then
+    spec="$1"
+    if [[ "$spec" == *@* ]]; then
+        PI_USER="${spec%%@*}"
+        spec="${spec#*@}"
+    fi
+    if [[ "$spec" == *:* ]]; then
+        PI_PORT="${spec##*:}"
+        spec="${spec%:*}"
+    fi
+    PI_HOST="$spec"
+fi
+echo "Target: ${PI_USER}@${PI_HOST}:${PI_PORT}"
 
 REMOTE="${PI_USER}@${PI_HOST}"
 BINARY="dist/tuner-master-linux-arm64"

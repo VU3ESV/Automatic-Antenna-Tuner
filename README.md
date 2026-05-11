@@ -67,17 +67,23 @@ installed on the Pi and chooses the right path automatically:
 | Service **not** installed       | Cross-compiles, stages `deploy/` + the binary on the Pi, runs `install.sh` end-to-end (creates user, FHS dirs, registers + starts systemd unit). |
 | Service **installed**           | Cross-compiles, scp's the new binary, atomically swaps via `install -m 755`, restarts the service.       |
 
-In both cases it finishes with a `/healthz` check.
+In both cases it finishes with a `/healthz` check. Target the Pi
+either as a positional argument or via env vars:
 
 ```sh
-# Export once in your shell rc:
-export PI_HOST=tuner-pi.local   # or 192.168.1.42
-export PI_USER=pi
+# Quickest: pass the SSH spec inline.
+./deploy/redeploy.sh pi@tuner-pi.local
+./deploy/redeploy.sh vinod@192.168.1.42:2222     # custom user + non-standard port
 
+# Or set the env vars once (e.g. in your shell rc) and just run the script:
+export PI_HOST=tuner-pi.local
+export PI_USER=pi
 ./deploy/redeploy.sh
 ```
 
-The Pi user needs passwordless sudo (the usual Pi default).
+Defaults: `pi@tuner-pi.local:22`. The positional arg overrides the env
+vars; the env vars override the defaults. The Pi user needs
+passwordless sudo (the usual Pi default).
 
 > First-time use note: after the install-mode path completes, edit
 > `/etc/tuner-master/config.toml` on the Pi to point at your tuner
