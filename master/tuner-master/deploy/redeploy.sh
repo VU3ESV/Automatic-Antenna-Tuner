@@ -105,8 +105,26 @@ fi
 
 REMOTE="${PI_USER}@${PI_HOST}"
 BINARY="dist/tuner-master-linux-arm64"
-SSH_OPTS=(-p "$PI_PORT" -o ConnectTimeout=10)
-SCP_OPTS=(-P "$PI_PORT" -o ConnectTimeout=10)
+
+# SSH ControlMaster: open a single multiplexed connection so subsequent
+# ssh/scp invocations share auth. If the user doesn't have keys set up,
+# this collapses 5-8 password prompts down to 1.
+SSH_CTRL_PATH="${TMPDIR:-/tmp}/redeploy-ssh-$$.sock"
+SSH_CTRL_OPTS=(
+    -o ControlMaster=auto
+    -o ControlPath="$SSH_CTRL_PATH"
+    -o ControlPersist=60s
+)
+SSH_OPTS=(-p "$PI_PORT" -o ConnectTimeout=10 "${SSH_CTRL_OPTS[@]}")
+SCP_OPTS=(-P "$PI_PORT" -o ConnectTimeout=10 "${SSH_CTRL_OPTS[@]}")
+
+# Tear down the multiplexed connection when the script exits.
+cleanup_ssh() {
+    if [ -e "$SSH_CTRL_PATH" ]; then
+        ssh -o ControlPath="$SSH_CTRL_PATH" -O exit "$REMOTE" 2>/dev/null || true
+    fi
+}
+trap cleanup_ssh EXIT
 
 push_config_if_requested() {
     if [ -z "$PUSH_CONFIG_FILE" ]; then
@@ -174,7 +192,7 @@ else
     ssh "${SSH_OPTS[@]}" "$REMOTE" "
         set -e
         chmod +x '${REMOTE_DIR}/install.sh' '${REMOTE_DIR}/build-pi.sh' '${REMOTE_DIR}/redeploy.sh' 2>/dev/null || true
-        sudo '${REMOTE_DIR}/install.sh'
+        sudo '${REMOTE_DIR}/install.sh' '${REMOTE_DIR}/dist/tuner-master-linux-arm64'
         rm -rf '${REMOTE_DIR}'
     "
     # On first install, install.sh has just seeded /etc/tuner-master/config.toml

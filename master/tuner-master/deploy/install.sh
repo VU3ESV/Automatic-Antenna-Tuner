@@ -28,12 +28,17 @@ fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 
-# Resolve the binary path.
+# Resolve the binary path. Two layouts are supported automatically:
+#   * Checked-out / sneakernet:  ../dist/<binary> relative to install.sh
+#   * redeploy.sh staging:        ./dist/<binary>  relative to install.sh
+# Or pass the path explicitly as $1 (what redeploy.sh does).
 BINARY="${1:-}"
 if [ -z "$BINARY" ]; then
     for candidate in \
         "$SCRIPT_DIR/../dist/tuner-master-linux-arm64" \
+        "$SCRIPT_DIR/dist/tuner-master-linux-arm64" \
         "$SCRIPT_DIR/../dist/tuner-master-linux-armv7" \
+        "$SCRIPT_DIR/dist/tuner-master-linux-armv7" \
         "$SCRIPT_DIR/tuner-master"; do
         if [ -x "$candidate" ]; then
             BINARY="$candidate"
