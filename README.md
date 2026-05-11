@@ -85,6 +85,29 @@ Defaults: `pi@tuner-pi.local:22`. The positional arg overrides the env
 vars; the env vars override the defaults. The Pi user needs
 passwordless sudo (the usual Pi default).
 
+### Config is preserved by default
+
+`redeploy.sh` **never overwrites** the Pi-side `[tuner]`, `[cat]`, or
+any other config section across redeploys. Once you've edited
+`/etc/tuner-master/config.toml` on the Pi (to set the real
+controller IP, CAT device, etc.), those edits survive every
+subsequent `redeploy.sh` run. The script logs `Config: preserved on
+the Pi` at start so the intent is obvious.
+
+If you *do* need to push a new config from the dev machine — e.g.,
+after adding a new top-level section — use the opt-in flag:
+
+```sh
+./deploy/redeploy.sh --push-config ./my-tuner.toml pi@tuner-pi.local
+```
+
+That scp's the file, **backs up the existing config to
+`/etc/tuner-master/config.toml.bak`** on the Pi, installs the new
+one as `/etc/tuner-master/config.toml`, and restarts the service.
+Pass any path — typically you'd keep a non-committed
+`master/tuner-master/deploy/config.tuner-pi.toml` (or similar) with
+your live station values.
+
 > First-time use note: after the install-mode path completes, edit
 > `/etc/tuner-master/config.toml` on the Pi to point at your tuner
 > controller's IP, then `sudo systemctl restart tuner-master.service`.

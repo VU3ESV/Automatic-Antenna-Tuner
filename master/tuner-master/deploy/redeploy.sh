@@ -25,6 +25,15 @@
 #
 #      defaults: PI_USER=pi  PI_HOST=tuner-pi.local  PI_PORT=22
 #
+# Optional flag:
+#
+#   --push-config <path>   Push <path> to /etc/tuner-master/config.toml on
+#                          the Pi (backing up the existing one to .bak),
+#                          then restart the service. WITHOUT this flag the
+#                          Pi-side config is NEVER touched — your
+#                          hand-edited [tuner].host, [cat].device, etc.
+#                          survive every redeploy.
+#
 # The Pi user must have passwordless sudo (the usual Pi default).
 # Requires: ssh, scp, sudo on the Pi.
 
@@ -39,25 +48,84 @@ PI_HOST="${PI_HOST:-tuner-pi.local}"
 PI_USER="${PI_USER:-pi}"
 PI_PORT="${PI_PORT:-22}"
 
-# Positional arg overrides env vars: [user@]host[:port].
-if [ -n "${1:-}" ]; then
-    spec="$1"
-    if [[ "$spec" == *@* ]]; then
-        PI_USER="${spec%%@*}"
-        spec="${spec#*@}"
-    fi
-    if [[ "$spec" == *:* ]]; then
-        PI_PORT="${spec##*:}"
-        spec="${spec%:*}"
-    fi
-    PI_HOST="$spec"
-fi
+PUSH_CONFIG_FILE=""
+
+usage() {
+    echo "Usage: $0 [--push-config <path>] [user@host[:port]]"
+}
+
+# Parse leading flags, then the optional positional [user@]host[:port].
+while [ "${1:-}" != "" ]; do
+    case "$1" in
+        --push-config)
+            shift
+            if [ -z "${1:-}" ]; then
+                echo "--push-config requires a file path." >&2
+                usage
+                exit 1
+            fi
+            PUSH_CONFIG_FILE="$1"
+            if [ ! -f "$PUSH_CONFIG_FILE" ]; then
+                echo "--push-config: file not found: $PUSH_CONFIG_FILE" >&2
+                exit 1
+            fi
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --*)
+            echo "Unknown flag: $1" >&2
+            usage
+            exit 1
+            ;;
+        *)
+            # Positional [user@]host[:port].
+            spec="$1"
+            if [[ "$spec" == *@* ]]; then
+                PI_USER="${spec%%@*}"
+                spec="${spec#*@}"
+            fi
+            if [[ "$spec" == *:* ]]; then
+                PI_PORT="${spec##*:}"
+                spec="${spec%:*}"
+            fi
+            PI_HOST="$spec"
+            ;;
+    esac
+    shift
+done
+
 echo "Target: ${PI_USER}@${PI_HOST}:${PI_PORT}"
+if [ -n "$PUSH_CONFIG_FILE" ]; then
+    echo "Config: WILL push '${PUSH_CONFIG_FILE}' → /etc/tuner-master/config.toml (existing → .bak)"
+else
+    echo "Config: preserved on the Pi (use --push-config <path> to overwrite)"
+fi
 
 REMOTE="${PI_USER}@${PI_HOST}"
 BINARY="dist/tuner-master-linux-arm64"
 SSH_OPTS=(-p "$PI_PORT" -o ConnectTimeout=10)
 SCP_OPTS=(-P "$PI_PORT" -o ConnectTimeout=10)
+
+push_config_if_requested() {
+    if [ -z "$PUSH_CONFIG_FILE" ]; then
+        return 0
+    fi
+    local stage="/tmp/tuner-master.cfg.new"
+    echo "       --push-config: scp $(basename "$PUSH_CONFIG_FILE") → ${REMOTE}:${stage}..."
+    scp "${SCP_OPTS[@]}" "$PUSH_CONFIG_FILE" "${REMOTE}:${stage}"
+    ssh "${SSH_OPTS[@]}" "$REMOTE" "
+        set -e
+        if [ -f /etc/tuner-master/config.toml ]; then
+            sudo cp -a /etc/tuner-master/config.toml /etc/tuner-master/config.toml.bak
+            echo '         backed up existing config → /etc/tuner-master/config.toml.bak'
+        fi
+        sudo install -m 640 -o root -g tuner '${stage}' /etc/tuner-master/config.toml
+        rm -f '${stage}'
+        sudo systemctl restart tuner-master.service
+    "
+}
 
 # 1) Cross-compile (idempotent; cheap re-run).
 echo "[1/4] Cross-compiling..."
@@ -83,7 +151,7 @@ if [ "$MODE" = "redeploy" ]; then
     echo "[3/4] scp $(basename "$BINARY") → ${REMOTE}:${REMOTE_STAGE}..."
     scp "${SCP_OPTS[@]}" "$BINARY" "${REMOTE}:${REMOTE_STAGE}"
 
-    echo "       atomic install + restart..."
+    echo "       atomic install + restart (Pi-side config NOT touched)..."
     ssh "${SSH_OPTS[@]}" "$REMOTE" "
         set -e
         sudo install -m 755 -o root -g root '${REMOTE_STAGE}' /opt/tuner-master/tuner-master
@@ -91,6 +159,7 @@ if [ "$MODE" = "redeploy" ]; then
         sudo systemctl restart tuner-master.service
         sudo systemctl --no-pager --lines=5 status tuner-master.service
     "
+    push_config_if_requested
 else
     # First-time install: stage the entire deploy/ folder plus the binary,
     # then let install.sh do the heavy lifting.
@@ -108,8 +177,15 @@ else
         sudo '${REMOTE_DIR}/install.sh'
         rm -rf '${REMOTE_DIR}'
     "
-    echo "       NOTE: edit /etc/tuner-master/config.toml on the Pi to point at your tuner controller IP,"
-    echo "             then 'sudo systemctl restart tuner-master.service'."
+    # On first install, install.sh has just seeded /etc/tuner-master/config.toml
+    # from config.example.toml. If --push-config was requested, overwrite
+    # that seed now (and back it up). Subsequent redeploys will leave the
+    # config alone unless --push-config is set again.
+    push_config_if_requested
+    if [ -z "$PUSH_CONFIG_FILE" ]; then
+        echo "       NOTE: edit /etc/tuner-master/config.toml on the Pi to point at your tuner controller IP,"
+        echo "             then 'sudo systemctl restart tuner-master.service'."
+    fi
 fi
 
 # 4) Health check (works for both paths).
