@@ -210,27 +210,50 @@ during a faked TX is refused with a visible lockout banner.
 **Goal:** real SWR, R, X, |Z|, ∠Z in the `telemetry` stream, calibrated
 against bench instruments.
 
+Engineering detail and "what 'live' looks like" checklist:
+[`RF-DESIGN.md`](RF-DESIGN.md) §4. The list below is the milestone
+task breakdown; the *spec* lives in §4.
+
 - [ ] Build the Tandem-match coupler; verify Fwd/Rev directivity ≥ 25 dB
       across 1.8 – 54 MHz on the network analyzer.
-- [ ] Wire two AD8307s to Fwd/Rev coupler ports; calibrate slope/intercept
-      against a signal generator and known attenuator at 1, 10, 30 MHz
-      (multi-point cal table in NVRAM).
-- [ ] Wire AD8302 with V (capacitive tap on tuner input port) and I (small
-      Stockton CT) inputs at matched electrical length; calibrate `|Z|`
-      and `∠Z` against known resistive and reactive loads
-      (50 Ω, 100 Ω, 25 Ω, 50 − j50, 50 + j50).
-- [ ] Firmware `adc` task: 4-channel DMA at 100 µs, IIR-smoothed values
-      published to `telemetry` at ~30 Hz, raw values exposed via debug
-      verb for auto-tune use.
-- [ ] Master GUI: live SWR meter (analog-style sweep), |Z| / ∠Z polar dot,
-      R / X readouts. Same widgets the LP-100A-Server "Vector" view uses
-      where possible — reuse, don't reinvent.
-- [ ] Document the cal procedure in `docs/HARDWARE.md` so a future rebuild
-      of the coupler/detector chain is reproducible.
+      *(spec: RF-DESIGN.md §4.2; build notes: HARDWARE.md §5.)*
+- [ ] Wire two AD8307s to Fwd/Rev coupler ports with input pad, RC LPF,
+      and op-amp buffer per chip; calibrate slope/intercept per band.
+      *(spec: RF-DESIGN.md §4.3; cal procedure: §4.9 step 1, HARDWARE.md §6.)*
+- [ ] Wire AD8302 with V (capacitive tap) and I (small Stockton CT)
+      inputs at matched electrical length; bring PFLT pin out to a
+      GPIO for sign(X) disambiguation.
+      *(spec: RF-DESIGN.md §4.2 + §4.4; cal procedure: §4.9 steps 2–4.)*
+- [ ] Firmware `hal::adc` task: 4-channel DMA at 100 µs, 500 ms
+      averaging window, IIR-smoothed values published to `telemetry`
+      at ~30 Hz, raw samples exposed via `get_raw_adc` debug verb.
+      *(spec: RF-DESIGN.md §4.5.)*
+- [ ] Firmware decode path: V_fwd / V_rev / V_mag / V_phs → R, X, SWR,
+      P_fwd via the cal tables. PFLT-based sign(X) wired as primary.
+      *(spec: RF-DESIGN.md §4.6.)*
+- [ ] Firmware sanity gates: boot baseline in NVRAM, saturation
+      detection, path-consistency cross-check. Trip → `status warn:
+      cal_missing`; algorithm falls through to the manual escape hatch
+      (TUNING.md §4.1) when any gate trips.
+      *(spec: RF-DESIGN.md §4.10.)*
+- [ ] Detector-board power + grounding: clean +5 V LDO, star ground,
+      per-chip decoupling, separate rail from motor / relay drivers.
+      Inner shield can + feed-through caps + ferrites + common-mode
+      chokes on V/I lines per RF-DESIGN.md §4.7 / §4.8.
+- [ ] Calibration data storage: per-band slope / intercept (AD8307)
+      and offsets (AD8302) in TOML on master; pushed to controller on
+      connect.
+- [ ] Master GUI: live SWR meter (analog-style sweep), |Z| / ∠Z polar
+      dot, R / X readouts. Same widgets the LP-100A-Server "Vector"
+      view uses where possible — reuse, don't reinvent.
+- [ ] Document the cal procedure in `docs/HARDWARE.md` §6 (already
+      cross-referenced; build the actual step-by-step bench checklist
+      against measured values during commissioning).
 
 **Exit criteria:** with a calibrated load (50 Ω, 100 Ω, 25 Ω, complex
-loads via a stub-tuner test fixture), the GUI reads R, X, SWR within 3 %
-and ±2° phase across 1.8 – 54 MHz.
+loads via a stub-tuner test fixture), the GUI reads R, X, SWR within
+3 % and ±2° phase across 1.8 – 54 MHz, **and** every row in the
+RF-DESIGN.md §4.11 "chain is live" checklist is ticked.
 
 ---
 

@@ -60,13 +60,21 @@ These are written incrementally as the build proceeds:
   [`../CLAUDE.md`](../CLAUDE.md) "MCU selection").
 - **§4 Pin assignments and connector pinouts** — *M1b.2* (must align
   with `hal/*_teensy41.cpp` once those land).
-- **§5 Tandem-match coupler build notes** — *M2*. Phase reference
-  capture, directivity measurement procedure, port-isolation sanity.
-- **§6 Detector calibration procedure** — *M2*. Per-band slope /
-  intercept for the AD8307 pair, AD8302 |Z| / ∠Z cal against
-  known resistive and reactive loads (50 Ω, 100 Ω, 25 Ω,
-  50 − j50, 50 + j50). Closed-form decoding lives in
-  [`RF-DESIGN.md`](RF-DESIGN.md) §4.
+- **§5 Tandem-match coupler build notes** — *M2*. Toroid choice,
+  primary / secondary turns, port-isolation measurement procedure,
+  directivity sweep across 1.8 – 54 MHz on the network analyzer.
+  See [`RF-DESIGN.md`](RF-DESIGN.md) §4.2 for the signal-flow role
+  and §4.11 for the full M2 "chain is live" checklist.
+- **§6 Detector calibration procedure** — *M2*. Step-by-step bench
+  procedure for the per-band calibration sweeps documented in
+  [`RF-DESIGN.md`](RF-DESIGN.md) §4.9: AD8307 slope / intercept
+  against a calibrated signal generator + step attenuator; AD8302
+  |Z| against `[10, 25, 50, 100, 250, 1000] Ω` resistive loads;
+  AD8302 ∠Z against `[50−j100, 50−j50, 50, 50+j50, 50+j100]`
+  reactive loads; path-length residual against a precision 50 Ω
+  load. The closed-form decode and the sanity gates that consume
+  these cal values live in [`RF-DESIGN.md`](RF-DESIGN.md) §4.6 and
+  §4.10 respectively.
 - **§7 RF immunity practices in this enclosure** — *M2 / M5*. Cross-
   references [`ARCHITECTURE.md §5.1.1`](ARCHITECTURE.md) for the
   enclosure-level practices the firmware assumes.
