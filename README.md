@@ -32,6 +32,11 @@ verbs only.
   calibration procedures. *(scaffold during M0)*
 - **[docs/PROTOCOL.md](docs/PROTOCOL.md)** — full WebSocket JSON protocol
   spec, frame by frame. *(scaffold during M0)*
+- **[docs/TUNING.md](docs/TUNING.md)** — tuning-algorithm strategy:
+  universal safety-gated tune protocol, per-band starting conditions,
+  four candidate algorithms (memory-first / pure analytic / coarse-grid
+  / hybrid) with pros + cons, and the chosen project decision (Proposal
+  D — hybrid).
 - **[docs/RF-DESIGN.md](docs/RF-DESIGN.md)** — L-network theory, component
   sizing, detector math. *(scaffold during M0)*
 - **[docs/DEV-SETUP.md](docs/DEV-SETUP.md)** — VS Code dev environment

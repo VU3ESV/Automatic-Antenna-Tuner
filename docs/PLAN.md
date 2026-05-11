@@ -265,6 +265,10 @@ identical state immediately.
 **Goal:** `auto_tune` verb produces a sub-1.2:1 SWR on any sane load
 across all bands, from a cold start (no memory).
 
+Strategy and trade-offs: see [`TUNING.md`](TUNING.md). M4 implements
+**Proposal D** (hybrid memory-first + analytic-seed-on-miss +
+hill-climb refine).
+
 - [ ] Analytic L-network solver in master Go code, fed by the latest
       `r`, `x` from `telemetry` while bypass is engaged at low power.
 - [ ] Per-axis calibration curves (`L(steps)`, `C(steps)`) derived from a

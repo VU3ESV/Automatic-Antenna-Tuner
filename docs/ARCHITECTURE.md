@@ -152,50 +152,25 @@ hill-climbing sees the instantaneous match.
 The master is the brain; the controller is the manipulator. The master
 decides "what L, C, side to be at"; the controller executes.
 
-Three strategies, escalating:
+The full strategy comparison — including the universal per-tune
+safety protocol (forced by invariant #1), the per-band starting-condition
+table, four candidate algorithms (A–D) with pros / cons, and the chosen
+project strategy with thresholds — is in [`TUNING.md`](TUNING.md). What
+follows is the one-paragraph summary; consult `TUNING.md` for the
+trade-offs and `RF-DESIGN.md` §3 for the closed-form L-network math.
 
-### 4.1 Recall (fast path)
-
-On any `recall(freq_hz)` (driven by either CAT polling or user input):
-
-1. Compute `band` from `freq_hz`, then `bucket = round(freq_hz / bucket_size)`.
-2. Look up `(l_steps, c_steps, side)` from SQLite.
-3. If found and `swr_at_save ≤ swr_recall_threshold` (default 1.5):
-   - Engage bypass (K3).
-   - Drive both axes to target positions in parallel.
-   - Switch K1/K2 to `side`.
-   - Disengage bypass.
-   - Operator may key TX; measured SWR is reported but no further motion.
-4. If not found or stale: fall to nearest neighbour in the same band, then
-   to band default, then to auto-tune.
-
-Typical recall time: **< 4 s** including bypass make/break (steppers
-microstep-limited, not RF-limited).
-
-### 4.2 Auto-tune (slow path)
-
-`auto_tune(freq_hz, power_w)` — operator keys a low-power tune carrier
-(≤ 10 W typical, configurable). The controller:
-
-1. Engages bypass; reports current `r`, `x`, swr.
-2. **Coarse step:** uses `r`, `x` at the network input (with bypass engaged
-   — i.e., the load impedance as seen through the balun, presented to the
-   tuner port) to compute the analytic L-network solution:
-   - If `r > 50`: choose **Hi-Z**; `Q = √(r/50 − 1)`; `Xl = Q·50 − x`;
-     `Xc = r/Q · 50/(r − 50/(1+Q²))` (textbook closed form, see
-     [`RF-DESIGN.md`](RF-DESIGN.md) §3).
-   - If `r < 50`: choose **Lo-Z**; mirror form.
-   - Convert `Xl → L` and `Xc → C` for the operating frequency, map to
-     stepper positions via the per-axis calibration curve.
-3. Drives to the analytic target; disengages bypass.
-4. **Fine step:** hill-climbs in (L, C) on SWR with the operator keying the
-   carrier. Step size shrinks geometrically. Stops when:
-   - `swr ≤ swr_done_threshold` (default 1.10), or
-   - improvement < 0.5 % over the last 8 iterations, or
-   - operator cancels.
-5. On success: emits a `memory` frame with the proposed slot; master GUI
-   prompts the operator to *Save*. Auto-save only if `auto_save = true` in
-   config (off by default — invariant #4 in `CLAUDE.md`).
+**Project decision: Proposal D — hybrid memory-first with analytic
+fallback.** On any `recall(freq_hz)` (driven by either CAT polling or
+operator action), the master looks up `(l_steps, c_steps, side)` from
+SQLite by `(band, bucket = round(freq_hz / bucket_size))`. On a hit
+within `swr_recall_threshold` (default 1.5), it engages bypass, moves
+both axes in parallel, restores `side`, disengages bypass, and reports.
+On a miss or a stale slot it measures `R, jX` in bypass mode, computes
+the analytic L-network solution to seed a starting point, moves there,
+and then hill-climbs on SWR until `≤ swr_done_threshold` (default 1.10).
+Successful tunes prompt the operator to save (auto-save disabled by
+default per invariant #4). Typical recall time **< 4 s**; cold-start
+auto-tune 15 – 60 s.
 
 ### 4.3 Operator nudge
 
