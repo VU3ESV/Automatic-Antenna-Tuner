@@ -49,9 +49,10 @@ UI.
 - One uniform shape across all station services so debug muscle memory
   transfers between LP-100A-Server and this project.
 
-## Non-goals
+## Non-goals (Phase 1)
 
-This codebase intentionally does **not** target:
+Phase 1 (M0 – M6, the committed delivery) intentionally does **not**
+target:
 
 - T-network or pi-network tuning. L-network only — see
   [CLAUDE.md](CLAUDE.md) "RF topology" for why.
@@ -63,6 +64,23 @@ This codebase intentionally does **not** target:
 - Replacing the LP-100A as the station reference meter. The tuner has
   its own SWR/Z chain for its own control loop; LP-100A remains
   authoritative for power and SWR display.
+
+## Phase 2 extensions (documented, not yet scheduled)
+
+The Phase 1 architecture is intentionally extensible. The following
+extensions are designed but gated on Phase 1 commissioning being
+clean — see [docs/EXTENSIONS.md](docs/EXTENSIONS.md) for the full
+scope, architecture options, and evolution path:
+
+- **Multiple antennas** — Doublet stays; HexBeam, Vertical, Yagi etc.
+  added behind an `antenna_id` abstraction.
+- **Multiple transceivers** — two or more rigs share the antenna
+  farm, each with its own routing rules per `(radio, band)`.
+- **SO2R** — Single Operator Two Radios contesting workflow, with
+  the interlock + BPF requirements documented in EXTENSIONS.md §5.
+
+The 4O3A TGXL / Antenna Genius family is the design reference for
+Phase 2 SO2R behaviour.
 
 ## Design rationale
 

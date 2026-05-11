@@ -21,6 +21,9 @@ For the architecture this plan implements, see
 | M4 | Auto-tune algorithm         | Recall + analytic L-network solve + hill-climb fine-tune, validated on a dummy load network.           | Pending M2/M3                                     |
 | M5 | RF commissioning            | Real Doublet on-air, per-band calibration of memory, soak test.                                        | Pending hardware                                  |
 | M6 | Hardening                   | Reconnect, lockouts, log-level API, systemd unit, cross-compile to Pi, udev rules, release pipeline.   | **Pi deploy pipeline ✅** (cross-compile + install.sh + systemd + redeploy.sh); reconnect ✅ (tunerclient 1s→30s backoff); log-level / udev / release pipeline pending |
+| M7 | Multi-antenna (Phase 2)     | Antenna abstraction, routing rules, memory schema with `antenna_id`, selector hardware.                | **Documented** in [`EXTENSIONS.md`](EXTENSIONS.md); gated on M5.   |
+| M8 | Multi-transceiver (Phase 2) | Second CAT + radio input matrix + per-radio routing, sequential TX (no SO2R yet).                      | **Documented**; gated on M7.                                       |
+| M9 | SO2R (Phase 2)              | Simultaneous TX on different antennas with BPF isolation + hardware interlock; ref 4O3A TGXL family.   | **Documented**; gated on M8.                                       |
 
 Numbers below assume one operator and an existing bench (scope, signal
 generator, dummy load + reactive simulator, RF wattmeter). Calendar weeks
@@ -356,6 +359,88 @@ release pipeline.
 fresh Pi brings the master up under systemd in one shot; the firmware
 flashes from a release artifact; a tagged release on GitHub publishes
 binaries automatically.
+
+---
+
+## Phase 2 — Multi-antenna, multi-transceiver, SO2R (M7+)
+
+The Phase 1 plan (M0 – M6) targets a single Doublet + single rig.
+Phase 2 extends to multiple antennas, multiple transceivers, and
+optional SO2R contesting mode. **Scope, architecture options, and
+trade-offs are in [`EXTENSIONS.md`](EXTENSIONS.md)** — read that
+first; the milestones below assume the evolution path in
+EXTENSIONS.md §9.
+
+Phase 2 is **documented but not scheduled.** Phase 2 milestones are
+gated on M5 (Phase 1 RF commissioning) being clean; commissioning
+findings may reshape the M7 scope.
+
+### M7 — Multi-antenna (single radio)
+
+**Goal:** operator switches between Doublet, HexBeam, and any other
+configured antenna in the UI; memory is keyed by `(antenna_id, band,
+bucket)`; routing rules drive automatic selection on QRG change.
+
+- [ ] Antenna abstraction (EXTENSIONS.md §2): TOML config, type
+      catalogue, per-type tuning behaviour.
+- [ ] Routing rules (EXTENSIONS.md §4): `(radio, band)` → antenna
+      table, operator override.
+- [ ] Memory schema migration (EXTENSIONS.md §6): add `antenna_id`
+      column to `slot`; default existing rows to the Phase 1 antenna.
+- [ ] Protocol v2: `set_antenna`, `set_routing`, `query_routing`,
+      `query_antennas` verbs (EXTENSIONS.md §7).
+- [ ] Hardware: M × N antenna-selector relay matrix (M = 1 radio in
+      M7, scales in M8).
+- [ ] Web UI: antenna picker; per-antenna live state; bypass path
+      logic for `needs_tuner = false` antennas.
+
+**Exit criteria:** with at least two antennas configured (e.g.
+Doublet + HexBeam), the operator can swap between them in the UI;
+each antenna has its own memory slots; CAT QRG changes auto-route per
+the configured rules.
+
+### M8 — Multi-transceiver (sequential)
+
+**Goal:** two or more transceivers share the antenna farm, each with
+its own CAT link and routing rules. SO2R remains *off* by default —
+only one radio TX at a time.
+
+- [ ] Second `[[radio]]` config block + second CAT-poller goroutine
+      tagged with `radio_id`.
+- [ ] Per-radio UI context (top-level radio selector; two-browser
+      workflow tested).
+- [ ] Interlock invariant #7 (EXTENSIONS.md §5.3): refuse routing of
+      a second radio to an in-use antenna.
+- [ ] Radio input matrix hardware.
+- [ ] `query_routing` returns resolved per-radio routes including
+      lockout flags.
+
+**Exit criteria:** with K3 + IC-7300 (or equivalent), each radio
+holds its own routing rules and memory; switching the active radio in
+the UI updates the routing display; the in-use antenna is correctly
+locked out from the second radio.
+
+### M9 — SO2R mode
+
+**Goal:** both radios may TX simultaneously on different antennas
+with band-pass filter isolation; the SO2R-capable contest workflow.
+
+- [ ] BPF declaration in TOML per radio path per band.
+- [ ] Interlock invariants #8 and #9 (EXTENSIONS.md §5.3): SO2R mode
+      gated on BPF coverage; per-tuner motion lockout when its
+      antenna is in use by a radio.
+- [ ] `set_so2r_mode` verb; mode toggle in UI.
+- [ ] Optional: migrate any always-needs-tuner antenna that wants
+      simultaneous-on-two-radios coverage to a tuner-bank
+      architecture (EXTENSIONS.md §8 Option B applied per-antenna).
+- [ ] Hardware-level antenna interlock (relay matrix layout makes
+      "two radios on one antenna" physically impossible, not just
+      firmware-refused).
+
+**Exit criteria:** with `mode = "so2r"` in config and BPFs in place,
+both radios can key simultaneously on different antennas without
+inter-radio desense, and the master refuses any routing that would
+violate the SO2R interlock.
 
 ---
 

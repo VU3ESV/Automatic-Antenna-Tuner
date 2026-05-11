@@ -42,6 +42,11 @@ verbs only.
   sizing, detector math. §3 closed-form L-network solution is the math
   reference for the auto-tune algorithm; §4 (detector chain) and §5
   (balun) fill in during M2 / M5.
+- **[docs/EXTENSIONS.md](docs/EXTENSIONS.md)** — Phase 2 scope: multi-
+  antenna (Doublet + HexBeam + …), multi-transceiver, and SO2R
+  workflow modelled on the 4O3A TGXL / Antenna Genius family.
+  Architecture options + trade-offs + evolution path M7 – M9. *(design
+  proposal, gated on Phase 1 commissioning.)*
 - **[docs/DEV-SETUP.md](docs/DEV-SETUP.md)** — VS Code dev environment
   for both firmware (PlatformIO/Teensy) and master (Go/Pi).
 - **[firmware/teensy-selftest/](firmware/teensy-selftest/)** —

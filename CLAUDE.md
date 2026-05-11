@@ -224,10 +224,16 @@ Following the LP-100A-Server precedent so the station's services stay uniform:
 
 ## What this codebase intentionally does **not** do
 
+**Phase 1 scope (M0 – M6, the committed delivery):**
+
 - T-network or pi-network tuning. L-network only — see "RF topology" above.
 - Balanced-line tuning without a balun. The balun is part of the architecture.
 - Hot-switching the L or C under RF. The TX lockout is enforced in firmware
   *and* the master GUI; both must agree before motion is permitted.
+- Multiple antennas, multiple transceivers, SO2R. **Phase 1 is single
+  Doublet, single rig.** Multi-antenna / multi-rig / SO2R is documented
+  as a Phase 2 extension in [docs/EXTENSIONS.md](docs/EXTENSIONS.md);
+  not built until Phase 1 commissioning is clean.
 - Cloud relay / NAT traversal. LAN deployment, like LP-100A-Server.
 - Logging/charting of long-term match data. A separate subscriber can write
   to InfluxDB if wanted — out of scope here.
