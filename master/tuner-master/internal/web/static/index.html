@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Automatic Antenna Tuner</title>
+  <style>
+    :root {
+      --bg: #111; --fg: #eee; --muted: #888;
+      --panel: #1a1a1a; --border: #333;
+      --red: #7a1f1f; --green: #1f7a3a; --yellow: #7a6a1f; --blue: #1f4a7a;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      margin: 0; padding: 1.5em; background: var(--bg); color: var(--fg);
+    }
+    h1 { font-weight: 500; margin: 0 0 0.5em; }
+    .stage { color: var(--muted); font-size: 0.7em; font-weight: 400; }
+    .pill {
+      display: inline-block; padding: 0.25em 0.75em;
+      border-radius: 1em; font-size: 0.85em;
+      transition: background 0.3s ease;
+    }
+    .pill.red    { background: var(--red); }
+    .pill.green  { background: var(--green); }
+    .pill.yellow { background: var(--yellow); }
+    .pill.blue   { background: var(--blue); }
+    .panel {
+      padding: 1em 1.25em; border: 1px solid var(--border);
+      border-radius: 0.5em; margin-top: 1em; background: var(--panel);
+    }
+    .label { color: var(--muted); font-size: 0.85em; }
+    .big   { font-size: 2.5em; font-weight: 200; line-height: 1; margin-top: 0.2em;
+             font-variant-numeric: tabular-nums; }
+    .med   { font-size: 1.4em; font-weight: 300; font-variant-numeric: tabular-nums; }
+    .row   { display: flex; gap: 1em; flex-wrap: wrap; }
+    .row > .panel { flex: 1; min-width: 180px; margin-top: 1em; }
+    code   { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+    .ago   { color: var(--muted); font-size: 0.8em; margin-left: 0.5em; }
+  </style>
+</head>
+<body>
+  <h1>Automatic Antenna Tuner <span class="stage">M1</span></h1>
+
+  <div>
+    Master:     <span id="ws"  class="pill yellow">connecting</span>
+    Controller: <span id="ctl" class="pill red">disconnected</span>
+    <span class="ago" id="seq">seq —</span>
+  </div>
+
+  <div class="panel">
+    <div class="label">SWR</div>
+    <div id="swr" class="big">—</div>
+    <div class="label" style="margin-top:0.5em">Mode: <span id="mode">—</span> · Fwd: <span id="fwd">—</span> W · Rev: <span id="rev">—</span> W</div>
+  </div>
+
+  <div class="row">
+    <div class="panel">
+      <div class="label">L (steps · enc)</div>
+      <div class="med"><span id="lsteps">—</span> · <span id="lenc">—</span></div>
+    </div>
+    <div class="panel">
+      <div class="label">C (steps · enc)</div>
+      <div class="med"><span id="csteps">—</span> · <span id="cenc">—</span></div>
+    </div>
+    <div class="panel">
+      <div class="label">Side · Bypass</div>
+      <div class="med"><span id="side">—</span> · <span id="bypass">—</span></div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="panel">
+      <div class="label">|Z|</div>
+      <div class="med"><span id="zmag">—</span> Ω</div>
+    </div>
+    <div class="panel">
+      <div class="label">∠Z</div>
+      <div class="med"><span id="zphase">—</span>°</div>
+    </div>
+    <div class="panel">
+      <div class="label">R · X</div>
+      <div class="med"><span id="r">—</span> · <span id="x">—</span> Ω</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="label">QRG</div>
+    <div class="med"><span id="qrg">—</span> Hz <span class="ago" id="qrgmode">—</span></div>
+  </div>
+
+  <p style="color: var(--muted); margin-top: 2em;">
+    M1 scaffold — synthetic telemetry from <code>fakecontroller</code>.
+    Real controller link arrives mid-M1 once the firmware has its WS
+    server. See <code>docs/PLAN.md</code>.
+  </p>
+
+  <script>
+    const $ = id => document.getElementById(id);
+    const fmt  = (v, d=2) => (v == null ? '—' : Number(v).toFixed(d));
+    const fmtI = v => (v == null ? '—' : String(v));
+
+    function setPill(el, cls, text) {
+      el.className = 'pill ' + cls;
+      el.textContent = text;
+    }
+
+    function connect() {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const ws = new WebSocket(proto + '://' + location.host + '/ws');
+      let lastSeq = 0;
+
+      ws.onopen = () => setPill($('ws'), 'green', 'connected');
+      ws.onclose = () => {
+        setPill($('ws'), 'red', 'disconnected');
+        setTimeout(connect, 1000);
+      };
+      ws.onerror = e => console.warn('ws error', e);
+
+      ws.onmessage = ev => {
+        let f;
+        try { f = JSON.parse(ev.data); } catch { return; }
+        if (f.seq) {
+          if (lastSeq && f.seq !== lastSeq + 1 && f.seq !== 1) {
+            console.warn('seq gap', lastSeq, '->', f.seq);
+          }
+          lastSeq = f.seq;
+          $('seq').textContent = 'seq ' + f.seq;
+        }
+        switch (f.type) {
+          case 'telemetry': {
+            const d = f.data;
+            $('swr').textContent  = fmt(d.swr, 2);
+            $('mode').textContent = d.mode || '—';
+            $('fwd').textContent  = fmt(d.fwd_w, 1);
+            $('rev').textContent  = fmt(d.rev_w, 2);
+            $('zmag').textContent  = fmt(d.z_mag, 1);
+            $('zphase').textContent= fmt(d.z_phase, 1);
+            $('r').textContent     = fmt(d.r, 1);
+            $('x').textContent     = fmt(d.x, 1);
+            break;
+          }
+          case 'state': {
+            const d = f.data;
+            $('lsteps').textContent = fmtI(d.l_steps);
+            $('csteps').textContent = fmtI(d.c_steps);
+            $('lenc').textContent   = fmtI(d.l_enc);
+            $('cenc').textContent   = fmtI(d.c_enc);
+            $('side').textContent   = d.side || '—';
+            $('bypass').textContent = d.bypass ? 'engaged' : 'engaged-out';
+            break;
+          }
+          case 'qrg': {
+            const d = f.data;
+            $('qrg').textContent     = d.freq_hz.toLocaleString();
+            $('qrgmode').textContent = (d.mode || '') + (d.rig ? ' · ' + d.rig : '');
+            break;
+          }
+          case 'status': {
+            // §2.5 — synthesised link-status frames carry the link
+            // state in `msg`. Real status frames will show inline
+            // banners; M1 just updates the pill.
+            const s = f.msg || '';
+            const cls = s === 'connected' ? 'green'
+                      : s === 'connecting' ? 'yellow'
+                      : 'red';
+            setPill($('ctl'), cls, s || 'unknown');
+            break;
+          }
+          case 'heartbeat':
+          case 'ack':
+          case 'memory':
+            break;
+          default:
+            console.debug('unhandled frame', f);
+        }
+      };
+    }
+
+    connect();
+  </script>
+</body>
+</html>

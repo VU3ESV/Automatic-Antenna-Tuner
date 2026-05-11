@@ -1,0 +1,20 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "master: run",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "${workspaceFolder}/master/tuner-master",
+            "args": ["-config", "${workspaceFolder}/master/tuner-master/deploy/config.example.toml", "-v"]
+        },
+        {
+            "name": "master: test (current package)",
+            "type": "go",
+            "request": "launch",
+            "mode": "test",
+            "program": "${fileDirname}"
+        }
+    ]
+}

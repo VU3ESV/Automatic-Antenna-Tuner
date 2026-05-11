@@ -1,0 +1,29 @@
+# Automatic Antenna Tuner — master configuration (M0 example).
+# Copy to a working file (or pass with -config) and edit as needed.
+
+[server]
+listen        = "0.0.0.0:8088"   # HTTP + WS endpoint for browsers / touch UI
+heartbeat_ms  = 2000
+
+[tuner]
+host          = "192.168.1.50"            # tuner-controller IP / hostname
+port          = 8089                      # TCP port (M1b transport; PROTOCOL.md §1.0)
+reconnect_ms  = 1000                      # initial backoff; grows to 30 s
+
+[cat]
+enabled       = false
+device        = "/dev/cu.usbserial-1"
+baud          = 19200
+rig           = "icom-civ"               # icom-civ | yaesu-cat | kenwood | k3
+poll_ms       = 200
+
+[encoders]
+enabled       = false                    # two Adafruit ANO (5735) on Pi GPIO
+
+[memory]
+db_path       = "./tuner-memory.db"      # SQLite file
+auto_save     = false                    # invariant #4: opt-in only
+
+# Optional cross-check via LP-100A-Server.
+# [lp100a]
+# url = "ws://192.168.1.51:8088/ws"

@@ -1,0 +1,32 @@
+# macOS
+.DS_Store
+
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+.clang_complete
+.gcc-flags.json
+*.elf
+*.hex
+*.bin
+*.map
+
+# Go build artefacts
+dist/
+master/tuner-master/tuner-master
+master/tuner-master/tuner-master.exe
+*.test
+*.out
+
+# VS Code (project-shared launch.json is committed; user-local state is not)
+.vscode/*.log
+.vscode/ipch/
+
+# JetBrains
+.idea/
+
+# Runtime / local
+*.local.toml
+*.db
+*.db-journal

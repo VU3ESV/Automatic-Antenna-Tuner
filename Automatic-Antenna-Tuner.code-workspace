@@ -1,0 +1,37 @@
+{
+    "folders": [
+        { "path": ".", "name": "tuner (root)" },
+        { "path": "firmware/tuner-controller", "name": "firmware (Teensy/STM32)" },
+        { "path": "master/tuner-master", "name": "master (Go on Pi)" }
+    ],
+    "settings": {
+        "files.exclude": {
+            ".pio": true,
+            "dist": true,
+            "**/.DS_Store": true
+        },
+        "go.lintTool": "golangci-lint",
+        "go.useLanguageServer": true,
+        "[go]": {
+            "editor.formatOnSave": true,
+            "editor.codeActionsOnSave": { "source.organizeImports": "explicit" }
+        },
+        "[c]":   { "editor.formatOnSave": true },
+        "[cpp]": { "editor.formatOnSave": true },
+        "platformio-ide.useBuiltinPIOCore": false,
+        "platformio-ide.activateProjectOnTextEditorChange": true
+    },
+    "extensions": {
+        "recommendations": [
+            "platformio.platformio-ide",
+            "marus25.cortex-debug",
+            "ms-vscode.vscode-serial-monitor",
+            "golang.go",
+            "ms-vscode-remote.remote-ssh",
+            "tamasfe.even-better-toml",
+            "redhat.vscode-yaml",
+            "yzhang.markdown-all-in-one",
+            "editorconfig.editorconfig"
+        ]
+    }
+}
