@@ -29,12 +29,12 @@ import (
 
 // Options configures the client.
 type Options struct {
-	Host             string        // tuner-controller IP / hostname
-	Port             int           // TCP port (default 8089)
-	InitialBackoff   time.Duration // first reconnect delay (default 1 s)
-	MaxBackoff       time.Duration // backoff ceiling (default 30 s)
-	ReadIdleTimeout  time.Duration // close+reconnect if no bytes for this long (default 10 s, > heartbeat period)
-	WriteTimeout     time.Duration // per-write deadline (default 2 s)
+	Host            string        // tuner-controller IP / hostname
+	Port            int           // TCP port (default 8089)
+	InitialBackoff  time.Duration // first reconnect delay (default 1 s)
+	MaxBackoff      time.Duration // backoff ceiling (default 30 s)
+	ReadIdleTimeout time.Duration // close+reconnect if no bytes for this long (default 10 s, > heartbeat period)
+	WriteTimeout    time.Duration // per-write deadline (default 2 s)
 }
 
 func (o *Options) withDefaults() {
@@ -60,8 +60,8 @@ type Client struct {
 	opts Options
 	core *state.Core
 
-	mu      sync.Mutex
-	conn    net.Conn
+	mu   sync.Mutex
+	conn net.Conn
 }
 
 // Run dials the tuner-controller and maintains the connection until ctx

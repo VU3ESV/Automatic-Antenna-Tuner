@@ -25,11 +25,11 @@ type CommandHandler func(ctx context.Context, cmd protocol.Command) (ok bool, co
 
 // Hub serves /ws and broadcasts state changes.
 type Hub struct {
-	core         *state.Core
-	handler      CommandHandler
-	heartbeat    time.Duration
-	upgrader     websocket.Upgrader
-	seq          atomic.Uint32
+	core      *state.Core
+	handler   CommandHandler
+	heartbeat time.Duration
+	upgrader  websocket.Upgrader
+	seq       atomic.Uint32
 }
 
 // New constructs a Hub. heartbeat is how often a heartbeat frame is

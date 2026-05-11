@@ -81,14 +81,14 @@ type Telemetry struct {
 }
 
 type TelemetryData struct {
-	FwdW    float64  `json:"fwd_w"`
-	RevW    float64  `json:"rev_w"`
-	SWR     *float64 `json:"swr"` // nil = infinite
-	ZMag    float64  `json:"z_mag"`
-	ZPhase  float64  `json:"z_phase"`
-	R       float64  `json:"r"`
-	X       float64  `json:"x"`
-	Mode    Mode     `json:"mode"`
+	FwdW   float64  `json:"fwd_w"`
+	RevW   float64  `json:"rev_w"`
+	SWR    *float64 `json:"swr"` // nil = infinite
+	ZMag   float64  `json:"z_mag"`
+	ZPhase float64  `json:"z_phase"`
+	R      float64  `json:"r"`
+	X      float64  `json:"x"`
+	Mode   Mode     `json:"mode"`
 }
 
 // State — PROTOCOL.md §2.2.

@@ -54,9 +54,9 @@ type Event struct {
 
 // Core is the state hub.
 type Core struct {
-	mu       sync.RWMutex
-	snap     Snapshot
-	subs     map[chan<- Event]struct{}
+	mu   sync.RWMutex
+	snap Snapshot
+	subs map[chan<- Event]struct{}
 }
 
 // New returns a Core in the initial state: bypass engaged, link
