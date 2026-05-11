@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
-# Build a fresh linux/arm64 binary on the dev machine, scp it to the Pi,
-# and restart the systemd service. This is the every-day iteration
-# script — install.sh is for first-time setup.
+# shellcheck disable=SC2029  # local vars (REMOTE_STAGE, REMOTE_DIR) are
+#                             # constants we WANT expanded client-side
+#                             # before being sent over ssh.
+
+# Build a fresh linux/arm64 binary on the dev machine, push it to the Pi,
+# and either:
+#   * if tuner-master.service is already installed on the Pi → fast
+#     redeploy (swap binary + restart), or
+#   * if not → stage deploy/ on the Pi and run install.sh end-to-end.
+#
+# That makes this the only script you need after the first push: it
+# bootstraps a fresh Pi and updates an existing one with the same
+# command.
 #
 # Configure once via env vars (export them in your shell rc, or pass
 # inline):
@@ -16,8 +26,7 @@
 #   ./deploy/redeploy.sh
 #   PI_HOST=192.168.1.42 PI_USER=vinod ./deploy/redeploy.sh
 #
-# Requires: ssh, scp, sudo on the Pi. First-time setup must have run
-# install.sh on the Pi already.
+# Requires: ssh, scp, sudo on the Pi.
 
 set -euo pipefail
 
@@ -31,35 +40,76 @@ PI_PORT="${PI_PORT:-22}"
 
 REMOTE="${PI_USER}@${PI_HOST}"
 BINARY="dist/tuner-master-linux-arm64"
-REMOTE_STAGE="/tmp/tuner-master.new"
+SSH_OPTS=(-p "$PI_PORT" -o ConnectTimeout=10)
+SCP_OPTS=(-P "$PI_PORT" -o ConnectTimeout=10)
 
-# 1) Cross-compile.
+# 1) Cross-compile (idempotent; cheap re-run).
 echo "[1/4] Cross-compiling..."
 "$SCRIPT_DIR/build-pi.sh"
 
-# 2) Copy to a staging path on the Pi (avoid overwriting the running binary).
-echo "[2/4] scp $(basename "$BINARY") → ${REMOTE}:${REMOTE_STAGE}..."
-scp -P "$PI_PORT" "$BINARY" "${REMOTE}:${REMOTE_STAGE}"
+# 2) Detect whether the service is already installed on the Pi.
+#    `systemctl list-unit-files` exits 0 even when the unit isn't found,
+#    so we grep the output instead.
+echo "[2/4] Probing ${REMOTE} for an existing tuner-master.service..."
+if ssh "${SSH_OPTS[@]}" "$REMOTE" \
+       "systemctl list-unit-files tuner-master.service --no-pager 2>/dev/null \
+        | grep -q '^tuner-master.service'"; then
+    MODE=redeploy
+    echo "       service IS installed → fast redeploy (swap binary + restart)"
+else
+    MODE=install
+    echo "       service NOT installed → full install.sh on the Pi"
+fi
 
-# 3) Atomic swap + restart.
-echo "[3/4] swapping binary and restarting service..."
-ssh -p "$PI_PORT" "$REMOTE" "
-    set -e
-    sudo install -m 755 -o root -g root '${REMOTE_STAGE}' /opt/tuner-master/tuner-master
-    rm -f '${REMOTE_STAGE}'
-    sudo systemctl restart tuner-master.service
-    sudo systemctl --no-pager --lines=5 status tuner-master.service
-"
+# 3) Push.
+if [ "$MODE" = "redeploy" ]; then
+    REMOTE_STAGE="/tmp/tuner-master.new"
+    echo "[3/4] scp $(basename "$BINARY") → ${REMOTE}:${REMOTE_STAGE}..."
+    scp "${SCP_OPTS[@]}" "$BINARY" "${REMOTE}:${REMOTE_STAGE}"
 
-# 4) Show health endpoint.
+    echo "       atomic install + restart..."
+    ssh "${SSH_OPTS[@]}" "$REMOTE" "
+        set -e
+        sudo install -m 755 -o root -g root '${REMOTE_STAGE}' /opt/tuner-master/tuner-master
+        rm -f '${REMOTE_STAGE}'
+        sudo systemctl restart tuner-master.service
+        sudo systemctl --no-pager --lines=5 status tuner-master.service
+    "
+else
+    # First-time install: stage the entire deploy/ folder plus the binary,
+    # then let install.sh do the heavy lifting.
+    REMOTE_DIR="/tmp/tuner-master-bootstrap"
+    echo "[3/4] staging deploy/ + binary → ${REMOTE}:${REMOTE_DIR}/..."
+    ssh "${SSH_OPTS[@]}" "$REMOTE" "rm -rf '${REMOTE_DIR}' && mkdir -p '${REMOTE_DIR}/dist'"
+    # The trailing /. on the source path copies contents (not the directory itself).
+    scp "${SCP_OPTS[@]}" -r "${SCRIPT_DIR}/." "${REMOTE}:${REMOTE_DIR}/"
+    scp "${SCP_OPTS[@]}" "$BINARY" "${REMOTE}:${REMOTE_DIR}/dist/"
+
+    echo "       running install.sh on the Pi (sudo will prompt if not passwordless)..."
+    ssh "${SSH_OPTS[@]}" "$REMOTE" "
+        set -e
+        chmod +x '${REMOTE_DIR}/install.sh' '${REMOTE_DIR}/build-pi.sh' '${REMOTE_DIR}/redeploy.sh' 2>/dev/null || true
+        sudo '${REMOTE_DIR}/install.sh'
+        rm -rf '${REMOTE_DIR}'
+    "
+    echo "       NOTE: edit /etc/tuner-master/config.toml on the Pi to point at your tuner controller IP,"
+    echo "             then 'sudo systemctl restart tuner-master.service'."
+fi
+
+# 4) Health check (works for both paths).
 echo "[4/4] health check..."
 if curl -fsS --max-time 5 "http://${PI_HOST}:8088/healthz" >/dev/null 2>&1; then
     echo "       /healthz: ok"
 else
-    echo "       /healthz: NOT reachable on port 8088 — check the config and journal"
-    exit 1
+    echo "       /healthz: NOT reachable on port 8088 yet."
+    if [ "$MODE" = "install" ]; then
+        echo "       (expected on first install until you edit the config and restart)"
+    else
+        echo "       check the journal: ssh ${REMOTE} 'journalctl -u tuner-master.service -n 50'"
+        exit 1
+    fi
 fi
 
 echo
-echo "Redeploy complete. Tail logs with:"
-echo "  ssh ${REMOTE} 'journalctl -u tuner-master.service -f'"
+echo "Done (${MODE})."
+echo "Tail logs:  ssh ${REMOTE} 'journalctl -u tuner-master.service -f'"

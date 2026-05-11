@@ -57,46 +57,17 @@ Pure-Go module — no cross-compile toolchain needed; any Go install on
 the dev machine can target `linux/arm64`. Layout follows the same
 LP-100A-Server shape so station services stay uniform.
 
-### First-time install
+### One script handles both first install and updates
 
-On the dev machine:
+`redeploy.sh` detects whether `tuner-master.service` is already
+installed on the Pi and chooses the right path automatically:
 
-```sh
-cd master/tuner-master
-./deploy/build-pi.sh                              # → dist/tuner-master-linux-arm64
-scp -r dist deploy pi@<pi-host>:/tmp/tuner-master-deploy
-```
+| Situation                       | What `redeploy.sh` does                                                                                  |
+|---------------------------------|----------------------------------------------------------------------------------------------------------|
+| Service **not** installed       | Cross-compiles, stages `deploy/` + the binary on the Pi, runs `install.sh` end-to-end (creates user, FHS dirs, registers + starts systemd unit). |
+| Service **installed**           | Cross-compiles, scp's the new binary, atomically swaps via `install -m 755`, restarts the service.       |
 
-On the Pi:
-
-```sh
-cd /tmp/tuner-master-deploy/deploy
-sudo ./install.sh
-sudo nano /etc/tuner-master/config.toml           # set [tuner].host to the controller's IP
-sudo systemctl restart tuner-master.service
-```
-
-`install.sh` is idempotent — re-run it for upgrades. It creates:
-
-| Path                                          | Purpose                                |
-|-----------------------------------------------|----------------------------------------|
-| `/opt/tuner-master/tuner-master`              | the binary                             |
-| `/etc/tuner-master/config.toml`               | config (never overwritten on re-install) |
-| `/var/lib/tuner-master/`                      | SQLite memory DB + runtime state       |
-| `/etc/systemd/system/tuner-master.service`    | systemd unit                           |
-| user/group `tuner`                            | system account, no shell               |
-
-Verify:
-
-```sh
-systemctl status tuner-master.service
-journalctl -u tuner-master.service -f
-curl http://<pi-host>:8088/healthz
-```
-
-### Fast iteration during dev
-
-Once installed, redeploy without re-running the whole install path:
+In both cases it finishes with a `/healthz` check.
 
 ```sh
 # Export once in your shell rc:
@@ -106,9 +77,50 @@ export PI_USER=pi
 ./deploy/redeploy.sh
 ```
 
-That cross-compiles, scp's the new binary, atomically swaps it via
-`install -m 755`, restarts the service, and hits `/healthz` to
-confirm. The PI user needs passwordless sudo (the usual Pi default).
+The Pi user needs passwordless sudo (the usual Pi default).
+
+> First-time use note: after the install-mode path completes, edit
+> `/etc/tuner-master/config.toml` on the Pi to point at your tuner
+> controller's IP, then `sudo systemctl restart tuner-master.service`.
+> Subsequent `redeploy.sh` runs preserve your config and take the
+> fast-update path.
+
+### What gets installed on the Pi
+
+| Path                                          | Purpose                                  |
+|-----------------------------------------------|------------------------------------------|
+| `/opt/tuner-master/tuner-master`              | the binary                               |
+| `/etc/tuner-master/config.toml`               | config (never overwritten on re-install) |
+| `/var/lib/tuner-master/`                      | SQLite memory DB + runtime state         |
+| `/etc/systemd/system/tuner-master.service`    | systemd unit                             |
+| user/group `tuner`                            | system account, no shell                 |
+
+Verify on the Pi:
+
+```sh
+systemctl status tuner-master.service
+journalctl -u tuner-master.service -f
+curl http://<pi-host>:8088/healthz
+```
+
+### Manual install (without redeploy.sh)
+
+If you'd rather drive the install yourself — for example, when the dev
+machine can't reach the Pi directly and you need to sneakernet a
+binary on a USB stick:
+
+```sh
+# On the dev machine:
+cd master/tuner-master
+./deploy/build-pi.sh
+scp -r dist deploy pi@<pi-host>:/tmp/tuner-master-deploy
+
+# On the Pi:
+cd /tmp/tuner-master-deploy/deploy
+sudo ./install.sh
+```
+
+`install.sh` is idempotent — re-run it for upgrades.
 
 ### Build for 32-bit Raspberry Pi OS / Pi Zero
 
