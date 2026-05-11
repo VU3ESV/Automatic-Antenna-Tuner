@@ -30,7 +30,10 @@ jobs:
         env:
           - teensy41          # Phase 1 deployed (QNEthernet / lwIP)
           - teensy41_native   # Phase 1 alternative (NativeEthernet / FNET)
-          - nucleo_h743zi     # Phase 2 fallback (STM32H7 portability check)
+          # nucleo_h743zi is dropped until M5 / Phase 2: the net_hal/
+          # layer has no STM32 lwIP backend yet, so the STM32 build
+          # can't link. The env definition is kept in platformio.ini
+          # as documentation. Re-enable when the STM32 backend lands.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
