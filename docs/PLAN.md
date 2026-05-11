@@ -20,7 +20,7 @@ For the architecture this plan implements, see
 | M3 | Master core + GUI           | Go master with embedded web UI, CAT polling, ANO encoders, memory store.                               | Partial — UI + WS hub done; CAT / encoders / memory pending |
 | M4 | Auto-tune algorithm         | Recall + analytic L-network solve + hill-climb fine-tune, validated on a dummy load network.           | Pending M2/M3                                     |
 | M5 | RF commissioning            | Real Doublet on-air, per-band calibration of memory, soak test.                                        | Pending hardware                                  |
-| M6 | Hardening                   | Reconnect, lockouts, log-level API, systemd unit, cross-compile to Pi, udev rules, release pipeline.   | Cross-compile verified; rest pending              |
+| M6 | Hardening                   | Reconnect, lockouts, log-level API, systemd unit, cross-compile to Pi, udev rules, release pipeline.   | **Pi deploy pipeline ✅** (cross-compile + install.sh + systemd + redeploy.sh); reconnect+lockouts+log-level+udev+release pending |
 
 Numbers below assume one operator and an existing bench (scope, signal
 generator, dummy load + reactive simulator, RF wattmeter). Calendar weeks
@@ -51,9 +51,11 @@ is green on every push.
 - [ ] CI: GitHub Actions running `go vet`, `go test -race`, `go build` on
       the master; `pio run -e teensy41 -e nucleo_h743zi` + `pio test
       -e native` on the firmware.
-- [ ] Cross-compile to Pi: `deploy/build-pi.sh`. Cross-compile *command*
-      verified manually (`GOOS=linux GOARCH=arm64 go build`); the
-      packaged script remains to be written.
+- [x] Cross-compile to Pi: `deploy/build-pi.sh` produces a stripped
+      5.9 MB `linux/arm64` binary. Plus `deploy/install.sh`,
+      `deploy/redeploy.sh`, `deploy/tuner-master.service` (systemd
+      unit) — full Pi deploy pipeline. See repo README "Deploy the
+      master to a Raspberry Pi".
 
 **Exit criteria:** open `http://<pi-ip>:8088/` in a browser, see the
 embedded UI showing a green "controller connected" pill when the Teensy is

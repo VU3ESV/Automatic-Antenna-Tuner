@@ -50,6 +50,75 @@ all three PlatformIO envs (`teensy41`, `nucleo_h743zi`, `native`); real
 Ethernet + WS bring-up happens when a Teensy is in hand. See
 [docs/PLAN.md](docs/PLAN.md) for the milestone-by-milestone state.
 
+## Deploy the master to a Raspberry Pi
+
+Targets Pi 4 / 5 running 64-bit Raspberry Pi OS (Debian 12+ derivative).
+Pure-Go module — no cross-compile toolchain needed; any Go install on
+the dev machine can target `linux/arm64`. Layout follows the same
+LP-100A-Server shape so station services stay uniform.
+
+### First-time install
+
+On the dev machine:
+
+```sh
+cd master/tuner-master
+./deploy/build-pi.sh                              # → dist/tuner-master-linux-arm64
+scp -r dist deploy pi@<pi-host>:/tmp/tuner-master-deploy
+```
+
+On the Pi:
+
+```sh
+cd /tmp/tuner-master-deploy/deploy
+sudo ./install.sh
+sudo nano /etc/tuner-master/config.toml           # set [tuner].host to the controller's IP
+sudo systemctl restart tuner-master.service
+```
+
+`install.sh` is idempotent — re-run it for upgrades. It creates:
+
+| Path                                          | Purpose                                |
+|-----------------------------------------------|----------------------------------------|
+| `/opt/tuner-master/tuner-master`              | the binary                             |
+| `/etc/tuner-master/config.toml`               | config (never overwritten on re-install) |
+| `/var/lib/tuner-master/`                      | SQLite memory DB + runtime state       |
+| `/etc/systemd/system/tuner-master.service`    | systemd unit                           |
+| user/group `tuner`                            | system account, no shell               |
+
+Verify:
+
+```sh
+systemctl status tuner-master.service
+journalctl -u tuner-master.service -f
+curl http://<pi-host>:8088/healthz
+```
+
+### Fast iteration during dev
+
+Once installed, redeploy without re-running the whole install path:
+
+```sh
+# Export once in your shell rc:
+export PI_HOST=tuner-pi.local   # or 192.168.1.42
+export PI_USER=pi
+
+./deploy/redeploy.sh
+```
+
+That cross-compiles, scp's the new binary, atomically swaps it via
+`install -m 755`, restarts the service, and hits `/healthz` to
+confirm. The PI user needs passwordless sudo (the usual Pi default).
+
+### Build for 32-bit Raspberry Pi OS / Pi Zero
+
+```sh
+ARCH=arm ./deploy/build-pi.sh    # → dist/tuner-master-linux-armv7
+```
+
+Same install.sh + systemd unit; just pass the armv7 binary to
+`install.sh`.
+
 ## Stack at a glance
 
 | Layer              | Choice                                                            |

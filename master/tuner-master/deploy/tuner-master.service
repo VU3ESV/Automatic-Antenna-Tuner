@@ -1,0 +1,50 @@
+[Unit]
+Description=Automatic Antenna Tuner master controller
+Documentation=https://github.com/VU3ESV/Automatic-Antenna-Tuner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tuner
+Group=tuner
+
+# Binary, config, and per-run state live under standard FHS paths.
+ExecStart=/opt/tuner-master/tuner-master \
+    -config /etc/tuner-master/config.toml
+WorkingDirectory=/var/lib/tuner-master
+
+# Restart on crash; don't thrash if it can't start.
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Journal-only logging; -v verbosity is controlled via config or
+# `systemctl edit tuner-master.service` adding -v to ExecStart.
+StandardOutput=journal
+StandardError=journal
+
+# Hardening — the master is internet-adjacent only via the LAN, but
+# good hygiene anyway.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+PrivateTmp=true
+PrivateDevices=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+# SQLite memory DB and any runtime files live here:
+ReadWritePaths=/var/lib/tuner-master
+
+# Network: bind to whatever the config says (default 0.0.0.0:8088).
+# No raw sockets needed; no NET_RAW capability granted.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target
