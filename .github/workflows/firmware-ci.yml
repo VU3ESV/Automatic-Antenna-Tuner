@@ -1,0 +1,107 @@
+name: firmware-ci
+
+# Builds every firmware target. The build matrix enforces two
+# abstractions documented in CLAUDE.md:
+#   - MCU portability rule: teensy41 (Phase 1) and nucleo_h743zi
+#     (Phase 2 fallback) both compile from the same source.
+#   - Ethernet backend portability rule: QNEthernet and NativeEthernet
+#     both compile against the net_hal/ abstraction.
+# Host-side Unity tests run on the `native` env.
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'firmware/**'
+      - '.github/workflows/firmware-ci.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'firmware/**'
+      - '.github/workflows/firmware-ci.yml'
+
+jobs:
+  tuner-controller:
+    name: tuner-controller / ${{ matrix.env }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env:
+          - teensy41          # Phase 1 deployed (QNEthernet / lwIP)
+          - teensy41_native   # Phase 1 alternative (NativeEthernet / FNET)
+          - nucleo_h743zi     # Phase 2 fallback (STM32H7 portability check)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: ${{ runner.os }}-pio-${{ matrix.env }}-${{ hashFiles('firmware/tuner-controller/platformio.ini') }}
+          restore-keys: |
+            ${{ runner.os }}-pio-${{ matrix.env }}-
+            ${{ runner.os }}-pio-
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+      - name: Build ${{ matrix.env }}
+        working-directory: firmware/tuner-controller
+        run: pio run -e ${{ matrix.env }}
+
+  tuner-controller-native-tests:
+    name: tuner-controller / native (Unity)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: ${{ runner.os }}-pio-native-${{ hashFiles('firmware/tuner-controller/platformio.ini') }}
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+      - name: Run native Unity tests
+        working-directory: firmware/tuner-controller
+        run: pio test -e native
+
+  teensy-selftest:
+    name: teensy-selftest / ${{ matrix.env }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env:
+          - teensy41
+          - teensy41_native
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: ${{ runner.os }}-pio-selftest-${{ matrix.env }}-${{ hashFiles('firmware/teensy-selftest/platformio.ini') }}
+          restore-keys: |
+            ${{ runner.os }}-pio-selftest-${{ matrix.env }}-
+            ${{ runner.os }}-pio-
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+      - name: Build ${{ matrix.env }}
+        working-directory: firmware/teensy-selftest
+        run: pio run -e ${{ matrix.env }}
