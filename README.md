@@ -21,24 +21,27 @@ verbs only.
 
 - **[CLAUDE.md](CLAUDE.md)** — project contract: invariants, protocol
   summary, hardware contract. Read this first.
-- **[PROPOSAL.md](PROPOSAL.md)** — problem, goals, design rationale.
-  *(scaffold next; matches LP-100A-Server's PROPOSAL.md shape)*
+- **[PROPOSAL.md](PROPOSAL.md)** — problem, goals, non-goals, design
+  rationale. Matches LP-100A-Server's PROPOSAL.md shape.
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — system view, RF
   topology, measurement chain, tuning algorithm, software architecture,
   failure modes.
 - **[docs/PLAN.md](docs/PLAN.md)** — milestone-based implementation
   plan (M0 scaffolding → M6 release).
 - **[docs/HARDWARE.md](docs/HARDWARE.md)** — BoM, schematics, wiring,
-  calibration procedures. *(scaffold during M0)*
+  calibration procedures. Short-form BoM today; long-form fills in
+  M1b.2 → M5.
 - **[docs/PROTOCOL.md](docs/PROTOCOL.md)** — full WebSocket JSON protocol
-  spec, frame by frame. *(scaffold during M0)*
+  spec, frame by frame.
 - **[docs/TUNING.md](docs/TUNING.md)** — tuning-algorithm strategy:
   universal safety-gated tune protocol, per-band starting conditions,
   four candidate algorithms (memory-first / pure analytic / coarse-grid
   / hybrid) with pros + cons, and the chosen project decision (Proposal
   D — hybrid).
 - **[docs/RF-DESIGN.md](docs/RF-DESIGN.md)** — L-network theory, component
-  sizing, detector math. *(scaffold during M0)*
+  sizing, detector math. §3 closed-form L-network solution is the math
+  reference for the auto-tune algorithm; §4 (detector chain) and §5
+  (balun) fill in during M2 / M5.
 - **[docs/DEV-SETUP.md](docs/DEV-SETUP.md)** — VS Code dev environment
   for both firmware (PlatformIO/Teensy) and master (Go/Pi).
 - **[firmware/teensy-selftest/](firmware/teensy-selftest/)** —
