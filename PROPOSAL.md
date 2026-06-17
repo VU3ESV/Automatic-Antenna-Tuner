@@ -111,6 +111,57 @@ Phase 2 SO2R behaviour.
   [docs/TUNING.md](docs/TUNING.md) for the four candidate strategies
   considered and the rationale for the choice.
 
+## Bench-test learnings (to fold into design)
+
+Notes captured during early hardware bring-up that the milestones (or
+the HAL) need to absorb. Each one is currently a known-issue; none is
+fixed in the eventual tuner-controller firmware yet.
+
+- **Stepper pulses must be hardware-generated, not main-loop-polled.**
+  Bench tests on an ESP32-C6 + TB6600 + NEMA 23 rig (firmware/esp32c6-
+  stepper-test) used the standard AccelStepper `runSpeed()` pattern from
+  the Arduino loop. As soon as the same loop also did `Preferences`
+  writes (clean-shutdown position anchor, per CLAUDE.md invariant 3),
+  WiFi event handling, or even ~2 ms of `Serial.println`, the pulse
+  train hiccuped and the motor drifted visibly per revolution. Mitigation
+  in the test sketch was throttling the NVS write interval to ~1 s and
+  silencing the trace log; the proper fix — codified into the
+  CLAUDE.md "Firmware portability rule" — is hardware pulse generation
+  (FlexPWM on Teensy 4.1, TIM+DMA on STM32H743) with the main loop free
+  to do persistence, networking, and UI work. Encoders catch the residual
+  open-loop error per invariant 3, but step accuracy should still be
+  achieved at the source.
+- **TB6600 ENA polarity is inverted from the datasheet's plain reading.**
+  Energising the ENA opto **disables** the driver — i.e. with common-
+  cathode wiring (signal− to GND, signal+ to GPIO), `LOW` on ENA+ enables
+  the motor and `HIGH` disables it. Documented in the test sketch but
+  the HAL's relay-and-driver abstraction should make this explicit so
+  the next person doesn't lose an hour to it.
+- **TB6600 needs ≥ 5 µs pulse width.** AccelStepper's 1 µs default is
+  too short for the TB6600 opto-coupled input. The HAL must expose a
+  configurable minimum pulse width per driver; default safe values
+  belong in `docs/HARDWARE.md` per driver family.
+- **TB6600 holding-current chopper is audibly loud at high coil
+  current.** At 3.5 A per phase the standstill PWM hiss is intrusive.
+  The test sketch mitigates by auto-releasing ENA after a configurable
+  idle timeout (3 s default, persisted across reboots), trading holding
+  torque for silence — acceptable for shafts with mechanical detent /
+  friction (roller inductor, vacuum cap), unsafe for back-drivable
+  loads. This is a TB6600-specific symptom and not a production concern
+  — CLAUDE.md hardware contract already specifies **TMC2209 in
+  StealthChop** for the production tuner, which is essentially silent
+  at standstill. The "release ENA when idle" behaviour is still worth
+  porting to the production HAL as an opt-in low-power mode.
+- **Open-network APs are unreliable on macOS clients.** During OTA
+  bring-up the captive-portal setup AP needed a WPA2 password to be
+  visible from a Mac; Windows 11 saw it open. Not load-bearing for the
+  tuner (which is Ethernet, not WiFi) but worth remembering if any
+  future bring-up boards use WiFi for first-time provisioning.
+- **ESP32-C6 broadcasts 11ax (WiFi 6) by default**, which many phone /
+  laptop clients filter out at scan time. If a WiFi-bring-up board is
+  ever used again, force `WIFI_PROTOCOL_11B|G|N` on the AP interface.
+  Captured for completeness even though tuner-controller is Ethernet.
+
 ## Status
 
 Milestone-by-milestone state lives in [docs/PLAN.md](docs/PLAN.md).

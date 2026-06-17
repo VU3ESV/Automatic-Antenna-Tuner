@@ -192,6 +192,18 @@ Concretely:
 - **No CGO-equivalent native dependencies** that would block re-tooling.
   PlatformIO is used for both targets; the build matrix in CI tests
   both even while only the Teensy is the deployed target.
+- **Step pulses MUST be hardware-generated, not software-timed in the
+  main loop.** AccelStepper-style `runSpeed()` polling in `loop()` is
+  forbidden in the tuner-controller firmware. Any blocking operation in
+  the main loop — NVS / SD writes, Serial flushes, lwIP socket activity,
+  WiFi events — silently pauses the pulse train and causes cumulative
+  step loss visible as per-revolution drift. The HAL must wrap a hardware
+  pulse generator: **FlexPWM on Teensy 4.1**, **TIM + DMA on STM32H743**,
+  **LEDC + PCNT on ESP32-class targets** if any are used for bring-up.
+  Position-counter writes to NVRAM (the clean-shutdown anchor required
+  by invariant 3) and any other persistent state MUST run independently
+  of pulse timing. Surfaced during ESP32-C6 + TB6600 bench testing,
+  2026-06; see PROPOSAL.md "Bench-test learnings".
 
 This rule does not apply to the master controller (Pi / Go) — that side
 is platform-stable.
