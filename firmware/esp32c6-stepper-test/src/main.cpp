@@ -68,6 +68,19 @@ static long lastReportedRev = 0;
 static unsigned long lastContSaveMs = 0;
 static const unsigned long CONT_SAVE_INTERVAL_MS = 1000;
 
+// Auto-release: after this much idle time, raise ENA to silence the
+// TB6600 chopper PWM (audible hiss / squeal especially at high current
+// settings).  Costs the motor its holding torque — safe for shafts with
+// friction / detent load, NOT safe if the shaft can be back-driven by
+// gravity, springs, vibration, etc.  Default ON; toggle with 'Q'.
+static bool          idleAutoRelease = true;
+static bool          driverReleased  = false;  // true ⇒ ENA temporarily HIGH
+static unsigned long lastMotionMs    = 0;
+static const unsigned long IDLE_RELEASE_MS = 3000;
+// TB6600 needs a few ms after ENA falling-edge before reliably accepting
+// step pulses.  Bound the re-engage delay so we don't lose the first step.
+static const unsigned long REENGAGE_SETTLE_MS = 5;
+
 // ── Pin assignments (ESP32-C6 DevKitC-1) ────────────────────────────
 static const uint8_t PIN_ENA  = 6;   // GPIO6
 static const uint8_t PIN_DIR  = 7;   // GPIO7
@@ -99,8 +112,29 @@ static void setEnaPin(bool level) {
 static void enableMotor(bool on) {
     motorEnabled = on;
     setEnaPin(!on); // LOW = driver enabled, HIGH = driver disabled
+    driverReleased = false;  // explicit user command overrides any idle release
     Serial.print(F("Motor "));
     Serial.println(on ? F("ENABLED") : F("DISABLED"));
+}
+
+// Called from loop() when the motor has been idle long enough — raises ENA
+// to silence the chopper PWM.  Logical motorEnabled stays true; only the
+// physical driver output is released.
+static void releaseDriverForIdle() {
+    digitalWrite(PIN_ENA, HIGH);
+    driverReleased = true;
+    Serial.println(F("[idle] driver released (silent)"));
+}
+
+// Called before any new motion command.  If the driver was auto-released,
+// re-energise it and wait the driver's settle time so the first step pulse
+// isn't lost.
+static void ensureDriverReady() {
+    if (!motorEnabled || !driverReleased) return;
+    digitalWrite(PIN_ENA, LOW);
+    driverReleased = false;
+    delay(REENGAGE_SETTLE_MS);
+    Serial.println(F("[idle] driver re-engaged"));
 }
 
 static void printStatus() {
@@ -113,6 +147,7 @@ static void printStatus() {
     Serial.println(F(" steps/s²"));
     Serial.print(F("Steps/rev     : ")); Serial.println(STEPS_PER_REV);
     Serial.print(F("Motor enabled : ")); Serial.println(motorEnabled ? F("YES") : F("NO"));
+    Serial.print(F("Idle release  : ")); Serial.println(idleAutoRelease ? F("ON") : F("OFF"));
     Serial.print(F("Continuous    : "));
     if (continuousMode)
         Serial.println(continuousDir > 0 ? F("CW") : F("CCW"));
@@ -139,6 +174,7 @@ static void printMenu() {
     Serial.println(F("  E  Enable motor  (ENA+ LOW)"));
     Serial.println(F("  D  Disable motor (ENA+ HIGH)"));
     Serial.println(F("  T  Toggle ENA+ pin (test polarity)"));
+    Serial.println(F("  Q  Toggle idle auto-release (silences hiss when stopped)"));
     Serial.println(F("  Z  Set current position = home (0), save to NVS"));
     Serial.println(F("  I  Show WiFi info + web UI URL"));
     Serial.println(F("  ?  Print current status"));
@@ -540,6 +576,7 @@ static void homeOnBoot() {
     Serial.print(F("Homing: driving from "));
     Serial.print(saved);
     Serial.println(F(" steps → 0 …"));
+    ensureDriverReady();
     stepper.moveTo(0);
     stepper.runToPosition();   // blocks until at position 0
     savePositionIfChanged();   // writes 0 to NVS
@@ -551,6 +588,7 @@ static void moveRevolutions(int n, int dir) {
         Serial.println(F("Motor is disabled — enable first (E)."));
         return;
     }
+    ensureDriverReady();
     long target = stepper.currentPosition() + (long)dir * n * STEPS_PER_REV;
     Serial.print(F("Moving to "));
     Serial.print(target);
@@ -585,6 +623,12 @@ void setup() {
     Serial.print(F("Restored position: "));
     Serial.print(savedPos);
     Serial.println(F(" steps (home = 0)"));
+
+    // Restore the user's idle-release preference (default ON).
+    idleAutoRelease = posPrefs.getBool("release", true);
+    Serial.print(F("Idle auto-release: "));
+    Serial.println(idleAutoRelease ? F("ON  (silent at rest)")
+                                   : F("OFF (motor holds with current)"));
 
     // Drive the motor back to step 0 — the boot-time homing action.
     homeOnBoot();
@@ -633,12 +677,21 @@ void loop() {
         stepper.run();
     }
 
-    // Detect the running → idle edge and persist the new position.
+    // Detect the running → idle edge: persist position and start the
+    // idle-release timer.
     bool nowRunning = continuousMode || stepper.distanceToGo() != 0;
     if (wasRunning && !nowRunning) {
         savePositionIfChanged();
+        lastMotionMs = millis();
     }
     wasRunning = nowRunning;
+
+    // Once the motor has been idle long enough, release the driver to
+    // silence the chopper PWM (audible hiss at higher current settings).
+    if (idleAutoRelease && !driverReleased && !nowRunning && motorEnabled
+        && (millis() - lastMotionMs >= IDLE_RELEASE_MS)) {
+        releaseDriverForIdle();
+    }
 
     if (!Serial.available()) return;
 
@@ -670,19 +723,32 @@ void loop() {
     }
     case '5':
         continuousMode = false;
-        stepper.move(100);
+        if (!motorEnabled) { Serial.println(F("Motor disabled — enable first (E).")); break; }
+        ensureDriverReady();
         Serial.println(F("Jog CW +100 steps"));
+        stepper.move(100);
+        stepper.runToPosition();         // blocking — completes all 100 steps
+        savePositionIfChanged();
+        lastMotionMs = millis();
+        wasRunning = false;              // we already serviced the running→idle edge
         break;
     case '6':
         continuousMode = false;
-        stepper.move(-100);
+        if (!motorEnabled) { Serial.println(F("Motor disabled — enable first (E).")); break; }
+        ensureDriverReady();
         Serial.println(F("Jog CCW -100 steps"));
+        stepper.move(-100);
+        stepper.runToPosition();         // blocking — completes all 100 steps
+        savePositionIfChanged();
+        lastMotionMs = millis();
+        wasRunning = false;
         break;
     case '7':
         if (continuousMode && continuousDir > 0) {
             continuousMode = false;
             Serial.println(F("Continuous CW stopped."));
         } else {
+            ensureDriverReady();
             continuousMode = true;
             continuousDir = +1;
             lastReportedRev = stepper.currentPosition() / STEPS_PER_REV;
@@ -695,6 +761,7 @@ void loop() {
             continuousMode = false;
             Serial.println(F("Continuous CCW stopped."));
         } else {
+            ensureDriverReady();
             continuousMode = true;
             continuousDir = -1;
             lastReportedRev = stepper.currentPosition() / STEPS_PER_REV;
@@ -746,6 +813,18 @@ void loop() {
         Serial.println(F("(Use T to toggle, check if motor shaft locks/unlocks)"));
         break;
     }
+    case 'Q': case 'q':
+        idleAutoRelease = !idleAutoRelease;
+        posPrefs.putBool("release", idleAutoRelease);
+        Serial.print(F("Idle auto-release: "));
+        Serial.println(idleAutoRelease ? F("ON (silent at rest, no holding torque)")
+                                       : F("OFF (motor holds position with current)"));
+        Serial.println(F("(setting saved — persists across reboots)"));
+        if (!idleAutoRelease && driverReleased) {
+            // Re-engage immediately so the user can feel the holding torque return.
+            ensureDriverReady();
+        }
+        break;
     case 'Z': case 'z':
         stepper.setCurrentPosition(0);
         savePositionIfChanged();

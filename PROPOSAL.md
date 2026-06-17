@@ -141,6 +141,17 @@ fixed in the eventual tuner-controller firmware yet.
   too short for the TB6600 opto-coupled input. The HAL must expose a
   configurable minimum pulse width per driver; default safe values
   belong in `docs/HARDWARE.md` per driver family.
+- **TB6600 holding-current chopper is audibly loud at high coil
+  current.** At 3.5 A per phase the standstill PWM hiss is intrusive.
+  The test sketch mitigates by auto-releasing ENA after a configurable
+  idle timeout (3 s default, persisted across reboots), trading holding
+  torque for silence — acceptable for shafts with mechanical detent /
+  friction (roller inductor, vacuum cap), unsafe for back-drivable
+  loads. This is a TB6600-specific symptom and not a production concern
+  — CLAUDE.md hardware contract already specifies **TMC2209 in
+  StealthChop** for the production tuner, which is essentially silent
+  at standstill. The "release ENA when idle" behaviour is still worth
+  porting to the production HAL as an opt-in low-power mode.
 - **Open-network APs are unreliable on macOS clients.** During OTA
   bring-up the captive-portal setup AP needed a WPA2 password to be
   visible from a Mac; Windows 11 saw it open. Not load-bearing for the
