@@ -156,6 +156,40 @@ quadrature decoder — no pin-mux constraint at the MCU layer. The
 constraint is the carrier's tier-1 pin count, not Teensy-side
 decode capacity.
 
+### 4.2 · Why I²C GPIO expanders are not on the option list
+
+The LCD-backpack family (PCF8574, MCP23017, PCA9555) looks tempting
+for "just add more encoder pins" but **does not work** for A/B
+quadrature inputs, even with a low-PPR encoder. Three layered
+reasons:
+
+- **No hardware quadrature decoder.** The expander reports raw pin
+  state; the MCU must reconstruct A/B → direction from polled
+  samples. Any missed intermediate state corrupts the count, and
+  the chips have no on-board count register that survives polling
+  latency the way the LS7366R does.
+- **I²C bandwidth + latency caps the edge rate.** MCP23017
+  interrupt-on-change with a Fast (400 kHz) bus has ~100 µs from
+  INT-assert to a completed INTCAP read. That ceilings sustainable
+  rate at ~5 kHz aggregate edges across all watched pins. A
+  100 PPR encoder (4× decode = 400 counts/rev) at typical bench
+  jog speeds (~1500 RPM motor, encoder on the rear shaft *before*
+  the gearbox) produces ~10 000 edges/s — past the ceiling. PCF8574
+  has no interrupt-on-change at all and is poll-only, which loses
+  edges between any two reads.
+- **Bus contention + ISR cost.** Even when edge rate fits, each I²C
+  completion needs ISR service. At 5 000 edges/s × 100 µs read =
+  ~50 % of CPU for one encoder. Three axes would starve the
+  FlexPWM step-counting ISR.
+
+An I²C expander **is** appropriate for the encoder's Z/index pulse
+(≤ 25 Hz at any conceivable motor speed) or for slow front-panel
+I/O (band switches, status LEDs, enclosure thermistor MUX). Using
+it for the index pin saves a tier-1 slot per axis but does not
+unlock a 3rd-axis A/B pair — 3 encoders still need either the SPI
+counter, a Teensy-header tap, or accepting open-loop on one axis,
+per §4.1.
+
 ## 5 · Relay-driver outputs (open-collector, 5 V/12 V coil jumper)
 
 The carrier exposes seven driver outputs intended for relay coils; we
