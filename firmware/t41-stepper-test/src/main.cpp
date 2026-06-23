@@ -37,6 +37,18 @@
 //     later (the underlying library keeps the lease renewed in the
 //     background).
 //
+// HTTP control surface (when DHCP succeeds):
+//   - http://<dhcp-ip>/  serves a one-page web UI mirroring the Serial
+//     menu (jog ±100, ±1/N revs, continuous CW/CCW, stop, e-stop,
+//     speed/accel, enable/disable, idle-release toggle, zero/home).
+//   - JSON status at /api/status (polled by the UI every 500 ms).
+//   - GET-only verb endpoints under /api/* — same code paths as the
+//     Serial handlers, so HTTP and Serial can never disagree.
+//   - LAN-only, no auth (same posture as LP-100A-Server).
+//   - HTTP-issued jog uses a non-blocking variant (no runToPosition)
+//     so the response returns immediately; serviceAxis() ticks the
+//     move forward in the main loop.
+//
 // Persistence (Teensy 4.1 emulated EEPROM, 4 KB, schema v2):
 //   - Per-axis step position is saved on every move-stop and throttled (1 s)
 //     during continuous mode, so a power-cycle has a near-current anchor.
@@ -162,6 +174,12 @@ static const uint32_t ETH_DHCP_TIMEOUT_MS = 8000;
 static uint8_t netMac[6]  = {0};
 static bool    netLinkUp  = false;
 static bool    netDhcpOK  = false;
+
+// ── HTTP control server ────────────────────────────────────────────────
+// Tiny GET-only API mirroring the Serial menu. LAN-only, no auth — same
+// posture as LP-100A-Server. Served only when DHCP succeeds.
+static EthernetServer httpServer(80);
+static bool           httpReady = false;
 
 // ── EEPROM helpers ──────────────────────────────────────────────────────
 
@@ -464,6 +482,430 @@ static void printNetStatus() {
     Serial.println(F("──────────────────────────────────"));
 }
 
+// ── HTTP control surface ────────────────────────────────────────────────
+// Tiny GET-only API mirroring the Serial menu. The same code path that
+// the Serial handler uses is reused (moveRevolutions, savePositionIfChanged,
+// enableAll, etc.) so HTTP and Serial can never disagree about what a
+// verb does. Jog uses a non-blocking variant (no runToPosition) so the
+// HTTP handler returns immediately and the serviceAxis() loop ticks
+// the move forward.
+
+static const char INDEX_HTML[] =
+R"HTML(<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>T41 Bench — X/Y stepper</title>
+<style>
+*{box-sizing:border-box}
+body{font-family:ui-monospace,Menlo,monospace;background:#111;color:#eee;margin:0;padding:1em;line-height:1.4}
+h1{margin:0 0 .25em;font-weight:300;font-size:1.4em}
+h2{margin:0 0 .35em;font-weight:300;font-size:1.1em}
+.bar{color:#888;font-size:.85em;margin-bottom:1em}
+.bar b{color:#eee}
+.axis{border:1px solid #333;padding:.8em 1em;margin:.6em 0;border-radius:8px;background:#1a1a1a}
+.axis.active{border-color:#4f4}
+.row{display:flex;flex-wrap:wrap;gap:.4em;align-items:center;margin:.4em 0}
+button{background:#2a2a2a;color:#eee;border:1px solid #555;padding:.45em .9em;border-radius:4px;cursor:pointer;font-family:inherit;font-size:.9em}
+button:hover{background:#3a3a3a}
+button.danger{background:#502020;border-color:#933}
+button.danger:hover{background:#702828}
+button.go{background:#1c3a1c;border-color:#494}
+button.go:hover{background:#264826}
+input[type=number]{background:#222;color:#eee;border:1px solid #555;padding:.4em;border-radius:4px;width:4.5em;font-family:inherit}
+.kv{font-size:.85em;color:#aaa}
+.kv b{color:#eee}
+.la{color:#f44;font-weight:bold}
+.lr{color:#4f4}
+.sep{color:#555;margin:0 .4em}
+</style></head>
+<body>
+<h1>T41 Bench — X/Y stepper</h1>
+<div class="bar">backend <b id="be">?</b> <span class="sep">·</span> ip <b id="ip">?</b> <span class="sep">·</span> link <b id="ln">?</b> <span class="sep">·</span> motors <b id="me">?</b> <span class="sep">·</span> idle-release <b id="ir">?</b></div>
+
+<div id="axes"></div>
+
+<div class="row">
+  <button onclick="cmd('/api/enable?on=1')">Enable all</button>
+  <button onclick="cmd('/api/enable?on=0')">Disable all</button>
+  <button onclick="cmd('/api/release?on=1')">Idle-release ON</button>
+  <button onclick="cmd('/api/release?on=0')">Idle-release OFF</button>
+</div>
+
+<script>
+async function cmd(u){try{await fetch(u);await poll();}catch(e){}}
+async function poll(){
+  try{
+    const r=await fetch('/api/status');
+    const s=await r.json();
+    render(s);
+  }catch(e){}
+}
+function render(s){
+  document.getElementById('be').textContent=s.net.backend;
+  document.getElementById('ip').textContent=s.net.ip;
+  document.getElementById('ln').textContent=s.net.link;
+  document.getElementById('me').textContent=s.motors?'ENABLED':'disabled';
+  document.getElementById('ir').textContent=s.release?'ON':'OFF';
+  const root=document.getElementById('axes');
+  // Build only once; update text after.
+  if(root.childElementCount!==s.axes.length){
+    root.innerHTML='';
+    for(const a of s.axes){
+      const d=document.createElement('div');
+      d.className='axis';d.id='ax-'+a.name;
+      d.innerHTML=`
+<h2><span class="axname">${a.name}</span> axis <span class="sel"></span></h2>
+<div class="kv">pos <b class="pos">?</b> steps <span class="sep">·</span> spd <b class="spd">?</b> <span class="sep">·</span> accel <b class="acc">?</b> <span class="sep">·</span> cont <b class="con">?</b> <span class="sep">·</span> limit <span class="lim">?</span></div>
+<div class="row">
+  <button onclick="cmd('/api/select?axis=${a.name}')">Select</button>
+  <button onclick="cmd('/api/jog?axis=${a.name}&dir=cw')">Jog +100</button>
+  <button onclick="cmd('/api/jog?axis=${a.name}&dir=ccw')">Jog −100</button>
+  <button onclick="cmd('/api/rotate?axis=${a.name}&revs=1&dir=cw')">+1 rev</button>
+  <button onclick="cmd('/api/rotate?axis=${a.name}&revs=1&dir=ccw')">−1 rev</button>
+  <input type="number" id="n-${a.name}" value="5" min="1">
+  <button onclick="cmd('/api/rotate?axis=${a.name}&revs='+document.getElementById('n-${a.name}').value+'&dir=cw')">+N rev</button>
+  <button onclick="cmd('/api/rotate?axis=${a.name}&revs='+document.getElementById('n-${a.name}').value+'&dir=ccw')">−N rev</button>
+</div>
+<div class="row">
+  <button class="go" onclick="cmd('/api/continuous?axis=${a.name}&dir=cw')">▶ Cont CW</button>
+  <button class="go" onclick="cmd('/api/continuous?axis=${a.name}&dir=ccw')">◀ Cont CCW</button>
+  <button onclick="cmd('/api/continuous?axis=${a.name}&dir=stop')">Stop cont</button>
+  <button onclick="cmd('/api/stop?axis=${a.name}')">Stop (decel)</button>
+  <button class="danger" onclick="cmd('/api/estop?axis=${a.name}')">E-STOP</button>
+  <button onclick="cmd('/api/zero?axis=${a.name}')">Zero (home)</button>
+</div>
+<div class="row">
+  spd <input type="number" id="s-${a.name}" min="1" step="50"> <button onclick="cmd('/api/speed?axis=${a.name}&v='+document.getElementById('s-${a.name}').value)">Set</button>
+  acc <input type="number" id="a-${a.name}" min="1" step="50"> <button onclick="cmd('/api/accel?axis=${a.name}&v='+document.getElementById('a-${a.name}').value)">Set</button>
+</div>`;
+      root.appendChild(d);
+    }
+  }
+  for(const a of s.axes){
+    const d=document.getElementById('ax-'+a.name);
+    if(!d)continue;
+    d.classList.toggle('active',a.selected);
+    d.querySelector('.sel').textContent=a.selected?'(active)':'';
+    d.querySelector('.pos').textContent=a.position;
+    d.querySelector('.spd').textContent=a.speed;
+    d.querySelector('.acc').textContent=a.accel;
+    d.querySelector('.con').textContent=a.continuous;
+    const lim=d.querySelector('.lim');
+    lim.textContent=a.limit;
+    lim.className='lim '+(a.limit==='ASSERTED'?'la':'lr');
+    const si=document.getElementById('s-'+a.name);
+    const ai=document.getElementById('a-'+a.name);
+    if(document.activeElement!==si)si.value=a.speed;
+    if(document.activeElement!==ai)ai.value=a.accel;
+  }
+}
+poll();setInterval(poll,500);
+</script>
+</body></html>)HTML";
+
+// ---- URL / query helpers ------------------------------------------------
+
+// Extract value of `key` from a query string ("axis=X&dir=cw"). Writes
+// up to outsz-1 chars (NUL-terminated). Returns true if found.
+static bool getParam(const char *query, const char *key, char *out, size_t outsz) {
+    if (!query || !out || outsz == 0) return false;
+    out[0] = '\0';
+    const size_t klen = strlen(key);
+    const char *p = query;
+    while (*p) {
+        if (strncmp(p, key, klen) == 0 && p[klen] == '=') {
+            p += klen + 1;
+            size_t i = 0;
+            while (*p && *p != '&' && i + 1 < outsz) out[i++] = *p++;
+            out[i] = '\0';
+            return true;
+        }
+        // skip to next & or end
+        while (*p && *p != '&') p++;
+        if (*p == '&') p++;
+    }
+    return false;
+}
+
+static Axis *findAxis(const char *name) {
+    if (!name || !*name) return nullptr;
+    for (int i = 0; i < NUM_AXES; i++) {
+        if (axes[i]->name[0] == name[0] || axes[i]->name[0] == (name[0] ^ 0x20)) {
+            return axes[i];
+        }
+    }
+    return nullptr;
+}
+
+// ---- HTTP response helpers ----------------------------------------------
+
+static void httpSendHeader(EthernetClient &c, int code, const char *status,
+                           const char *ctype, int contentLen) {
+    char hdr[160];
+    int n = snprintf(hdr, sizeof(hdr),
+                     "HTTP/1.1 %d %s\r\n"
+                     "Content-Type: %s\r\n"
+                     "Content-Length: %d\r\n"
+                     "Cache-Control: no-store\r\n"
+                     "Connection: close\r\n\r\n",
+                     code, status, ctype, contentLen);
+    c.write(reinterpret_cast<const uint8_t *>(hdr), n);
+}
+
+static void httpSendText(EthernetClient &c, int code, const char *status,
+                         const char *body) {
+    const int n = (int)strlen(body);
+    httpSendHeader(c, code, status, "text/plain; charset=utf-8", n);
+    c.write(reinterpret_cast<const uint8_t *>(body), n);
+}
+
+static void httpServeIndex(EthernetClient &c) {
+    const int n = (int)(sizeof(INDEX_HTML) - 1);
+    httpSendHeader(c, 200, "OK", "text/html; charset=utf-8", n);
+    c.write(reinterpret_cast<const uint8_t *>(INDEX_HTML), n);
+}
+
+static void httpServeStatusJson(EthernetClient &c) {
+    char json[640];
+    const IPAddress ip = Ethernet.localIP();
+    int n = snprintf(json, sizeof(json),
+        "{\"net\":{\"backend\":\"%s\",\"link\":\"%s\",\"ip\":\"%u.%u.%u.%u\"},"
+        "\"motors\":%s,\"release\":%s,\"axes\":[",
+        net_hal::lib_name(),
+        net_hal::link_state() ? "up" : "down",
+        ip[0], ip[1], ip[2], ip[3],
+        motorEnabled ? "true" : "false",
+        idleAutoRelease ? "true" : "false");
+    for (int i = 0; i < NUM_AXES && n < (int)sizeof(json); i++) {
+        const Axis &a = *axes[i];
+        const char *cont = a.continuousMode ? (a.continuousDir > 0 ? "CW" : "CCW") : "OFF";
+        const char *lim  = a.limitLastState == LOW ? "ASSERTED" : "released";
+        n += snprintf(json + n, sizeof(json) - n,
+            "%s{\"name\":\"%s\",\"position\":%ld,\"speed\":%.0f,\"accel\":%.0f,"
+            "\"continuous\":\"%s\",\"limit\":\"%s\",\"selected\":%s}",
+            i > 0 ? "," : "",
+            a.name, a.stepper.currentPosition(), a.currentSpeed, a.currentAccel,
+            cont, lim, (&a == selected) ? "true" : "false");
+    }
+    n += snprintf(json + n, sizeof(json) - n, "]}");
+    httpSendHeader(c, 200, "OK", "application/json", n);
+    c.write(reinterpret_cast<const uint8_t *>(json), n);
+}
+
+// ---- Non-blocking motion variants for HTTP -----------------------------
+// Same outcome as the Serial menu, but no runToPosition() so the HTTP
+// handler returns immediately. serviceAxis() ticks the move forward.
+
+static bool webJog(Axis &a, int dir) {
+    if (!motorEnabled) return false;
+    ensureDriverReady(a);
+    a.continuousMode = false;
+    a.stepper.move((long)dir * 100);
+    a.lastMotionMs = millis();
+    a.wasRunning = true;
+    return true;
+}
+
+static bool webContinuous(Axis &a, int dir) {
+    if (dir == 0) {
+        a.continuousMode = false;
+        return true;
+    }
+    if (!motorEnabled) return false;
+    ensureDriverReady(a);
+    a.continuousMode = true;
+    a.continuousDir  = dir > 0 ? +1 : -1;
+    a.lastReportedRev = a.stepper.currentPosition() / STEPS_PER_REV;
+    a.lastContSaveMs  = millis();
+    return true;
+}
+
+// ---- Dispatcher --------------------------------------------------------
+
+static void httpDispatch(EthernetClient &c, const char *path, const char *query) {
+    Serial.print(F("[http] ")); Serial.print(path);
+    if (*query) { Serial.print('?'); Serial.print(query); }
+    Serial.println();
+
+    if (strcmp(path, "/") == 0) { httpServeIndex(c); return; }
+    if (strcmp(path, "/api/status") == 0) { httpServeStatusJson(c); return; }
+
+    char axisName[4];
+    char dirStr[8];
+    char valStr[16];
+
+    if (strcmp(path, "/api/select") == 0) {
+        if (getParam(query, "axis", axisName, sizeof(axisName))) {
+            Axis *a = findAxis(axisName);
+            if (a) { selected = a; httpSendText(c, 200, "OK", "selected\n"); return; }
+        }
+        httpSendText(c, 400, "Bad Request", "bad axis\n"); return;
+    }
+
+    if (strcmp(path, "/api/jog") == 0) {
+        Axis *a = getParam(query, "axis", axisName, sizeof(axisName)) ? findAxis(axisName) : nullptr;
+        getParam(query, "dir", dirStr, sizeof(dirStr));
+        int dir = (strcmp(dirStr, "cw") == 0) ? +1 : (strcmp(dirStr, "ccw") == 0) ? -1 : 0;
+        if (!a || dir == 0) { httpSendText(c, 400, "Bad Request", "bad axis/dir\n"); return; }
+        if (!webJog(*a, dir)) { httpSendText(c, 409, "Conflict", "motors disabled\n"); return; }
+        httpSendText(c, 200, "OK", "jog\n"); return;
+    }
+
+    if (strcmp(path, "/api/rotate") == 0) {
+        Axis *a = getParam(query, "axis", axisName, sizeof(axisName)) ? findAxis(axisName) : nullptr;
+        getParam(query, "dir", dirStr, sizeof(dirStr));
+        getParam(query, "revs", valStr, sizeof(valStr));
+        int dir = (strcmp(dirStr, "cw") == 0) ? +1 : (strcmp(dirStr, "ccw") == 0) ? -1 : 0;
+        int n   = atoi(valStr);
+        if (!a || dir == 0 || n <= 0) { httpSendText(c, 400, "Bad Request", "bad args\n"); return; }
+        a->continuousMode = false;
+        moveRevolutions(*a, n, dir);
+        httpSendText(c, 200, "OK", "rotate\n"); return;
+    }
+
+    if (strcmp(path, "/api/continuous") == 0) {
+        Axis *a = getParam(query, "axis", axisName, sizeof(axisName)) ? findAxis(axisName) : nullptr;
+        getParam(query, "dir", dirStr, sizeof(dirStr));
+        int dir;
+        if      (strcmp(dirStr, "cw")   == 0) dir = +1;
+        else if (strcmp(dirStr, "ccw")  == 0) dir = -1;
+        else if (strcmp(dirStr, "stop") == 0) dir =  0;
+        else { httpSendText(c, 400, "Bad Request", "bad dir\n"); return; }
+        if (!a) { httpSendText(c, 400, "Bad Request", "bad axis\n"); return; }
+        if (!webContinuous(*a, dir)) { httpSendText(c, 409, "Conflict", "motors disabled\n"); return; }
+        httpSendText(c, 200, "OK", "continuous\n"); return;
+    }
+
+    if (strcmp(path, "/api/stop") == 0) {
+        Axis *a = getParam(query, "axis", axisName, sizeof(axisName)) ? findAxis(axisName) : nullptr;
+        if (!a) { httpSendText(c, 400, "Bad Request", "bad axis\n"); return; }
+        a->continuousMode = false;
+        a->stepper.stop();
+        httpSendText(c, 200, "OK", "stop\n"); return;
+    }
+
+    if (strcmp(path, "/api/estop") == 0) {
+        Axis *a = getParam(query, "axis", axisName, sizeof(axisName)) ? findAxis(axisName) : nullptr;
+        if (!a) { httpSendText(c, 400, "Bad Request", "bad axis\n"); return; }
+        a->continuousMode = false;
+        a->stepper.setCurrentPosition(a->stepper.currentPosition());  // zero velocity
+        httpSendText(c, 200, "OK", "estop\n"); return;
+    }
+
+    if (strcmp(path, "/api/zero") == 0) {
+        Axis *a = getParam(query, "axis", axisName, sizeof(axisName)) ? findAxis(axisName) : nullptr;
+        if (!a) { httpSendText(c, 400, "Bad Request", "bad axis\n"); return; }
+        a->stepper.setCurrentPosition(0);
+        savePositionIfChanged(*a);
+        httpSendText(c, 200, "OK", "zeroed\n"); return;
+    }
+
+    if (strcmp(path, "/api/speed") == 0) {
+        Axis *a = getParam(query, "axis", axisName, sizeof(axisName)) ? findAxis(axisName) : nullptr;
+        getParam(query, "v", valStr, sizeof(valStr));
+        float v = strtof(valStr, nullptr);
+        if (!a || v <= 0) { httpSendText(c, 400, "Bad Request", "bad args\n"); return; }
+        a->currentSpeed = v;
+        a->stepper.setMaxSpeed(v);
+        httpSendText(c, 200, "OK", "speed\n"); return;
+    }
+
+    if (strcmp(path, "/api/accel") == 0) {
+        Axis *a = getParam(query, "axis", axisName, sizeof(axisName)) ? findAxis(axisName) : nullptr;
+        getParam(query, "v", valStr, sizeof(valStr));
+        float v = strtof(valStr, nullptr);
+        if (!a || v <= 0) { httpSendText(c, 400, "Bad Request", "bad args\n"); return; }
+        a->currentAccel = v;
+        a->stepper.setAcceleration(v);
+        httpSendText(c, 200, "OK", "accel\n"); return;
+    }
+
+    if (strcmp(path, "/api/enable") == 0) {
+        getParam(query, "on", valStr, sizeof(valStr));
+        enableAll(strcmp(valStr, "1") == 0);
+        httpSendText(c, 200, "OK", "enable\n"); return;
+    }
+
+    if (strcmp(path, "/api/release") == 0) {
+        getParam(query, "on", valStr, sizeof(valStr));
+        bool on = strcmp(valStr, "1") == 0;
+        idleAutoRelease = on;
+        nvsSaveRelease(on);
+        if (!on) for (int i = 0; i < NUM_AXES; i++) ensureDriverReady(*axes[i]);
+        httpSendText(c, 200, "OK", "release\n"); return;
+    }
+
+    httpSendText(c, 404, "Not Found", "no such route\n");
+}
+
+// ---- Request reader ----------------------------------------------------
+
+// Read the request line into `line` (NUL-terminated). Drains the rest
+// of the headers (up to the blank line). Returns true if a request line
+// was read; false on timeout. CR bytes are stripped; the line ends at
+// the first \n.
+static bool httpReadRequest(EthernetClient &c, char *line, size_t linesz) {
+    const unsigned long start = millis();
+    size_t i = 0;
+    bool gotLF = false;
+    while (c.connected() && (millis() - start) < 500) {
+        if (!c.available()) { delay(1); continue; }
+        int b = c.read();
+        if (b < 0) break;
+        if (b == '\r') continue;
+        if (b == '\n') { gotLF = true; break; }
+        if (i + 1 < linesz) line[i++] = (char)b;
+    }
+    line[i] = '\0';
+    if (!gotLF) return false;
+    // Drain headers. State: 1 = previous char was an unescaped \n; if we
+    // see another \n immediately we've hit the blank line that ends the
+    // header block.
+    int state = 1;  // the request-line \n we just consumed counts
+    while (c.connected() && (millis() - start) < 500) {
+        if (!c.available()) { delay(1); continue; }
+        int b = c.read();
+        if (b < 0) break;
+        if (b == '\r') continue;
+        if (b == '\n') {
+            if (state == 1) return true;  // blank line → headers done
+            state = 1;
+        } else {
+            state = 0;
+        }
+    }
+    return true;  // soft-timeout: still try to dispatch
+}
+
+static void httpPoll() {
+    if (!httpReady) return;
+    EthernetClient client = httpServer.accept();
+    if (!client) return;
+
+    char line[160];
+    if (!httpReadRequest(client, line, sizeof(line))) {
+        client.stop();
+        return;
+    }
+
+    // Parse "GET /path?query HTTP/1.1"
+    char *method = line;
+    char *path = strchr(line, ' ');
+    if (!path) { client.stop(); return; }
+    *path++ = '\0';
+    char *httpver = strchr(path, ' ');
+    if (httpver) *httpver = '\0';
+    char *query = strchr(path, '?');
+    if (query) { *query++ = '\0'; } else { query = (char *)""; }
+
+    if (strcmp(method, "GET") != 0) {
+        httpSendText(client, 405, "Method Not Allowed", "GET only\n");
+    } else {
+        httpDispatch(client, path, query);
+    }
+    client.stop();
+}
+
 // ── setup / loop ────────────────────────────────────────────────────────
 
 void setup() {
@@ -506,6 +948,15 @@ void setup() {
     for (int i = 0; i < NUM_AXES; i++) homeAxisOnBoot(*axes[i]);
 
     bringUpEthernet();
+    if (netDhcpOK) {
+        httpServer.begin();
+        httpReady = true;
+        Serial.printf("[http] listening on http://%u.%u.%u.%u/\n",
+                      Ethernet.localIP()[0], Ethernet.localIP()[1],
+                      Ethernet.localIP()[2], Ethernet.localIP()[3]);
+    } else {
+        Serial.println(F("[http] not started (no DHCP)."));
+    }
 
     printMenu();
 }
@@ -514,6 +965,7 @@ void loop() {
     // Service both axes every loop iteration.
     for (int i = 0; i < NUM_AXES; i++) serviceAxis(*axes[i]);
     pollLimits();
+    httpPoll();
 
     if (!Serial.available()) return;
 
