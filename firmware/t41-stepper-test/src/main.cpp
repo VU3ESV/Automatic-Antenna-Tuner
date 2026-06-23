@@ -23,8 +23,19 @@
 //   Z        Active axis: set current position = home (0), save to EEPROM
 //   E / D    Enable / disable ALL axes
 //   Q        Toggle idle auto-release (global, persisted in EEPROM)
+//   N        Print network status (Ethernet backend, link, IP)
 //   ?        Print status (both axes + limits)
 //   H        Print menu
+//
+// Ethernet:
+//   - PJRC Ethernet kit on the V2.09 carrier socket.
+//   - Backend selectable at build time via the platformio.ini env:
+//       env:teensy41        — QNEthernet (lwIP, default)
+//       env:teensy41_native — NativeEthernet (FNET)
+//   - DHCP attempt runs once during setup() with short timeouts so a
+//     missing cable doesn't hold up motor testing. Inspect with 'N'
+//     later (the underlying library keeps the lease renewed in the
+//     background).
 //
 // Persistence (Teensy 4.1 emulated EEPROM, 4 KB, schema v2):
 //   - Per-axis step position is saved on every move-stop and throttled (1 s)
@@ -55,6 +66,11 @@
 // Bench's platformio.ini adds an -I onto firmware/tuner-controller/
 // src/hal/board/ to make this include resolve.
 #include "t41_v209.h"
+
+// Ethernet HAL shim — pick QNEthernet (lwIP) or NativeEthernet (FNET)
+// at compile time via the env's build_flags. Same source compiles
+// against either backend. See firmware/lib/net_hal/.
+#include "net_hal.h"
 
 // ── Pin assignments — V2.09 carrier (from docs/HW-T41-PINMAP.md) ────────
 namespace board = hal::board::t41_v209;
@@ -135,6 +151,17 @@ static const unsigned long REENGAGE_SETTLE_MS      = 5;
 static const unsigned long CONT_SAVE_INTERVAL_MS   = 1000;
 static const unsigned long LIMIT_POLL_INTERVAL_MS  = 15;  // sampled debounce
 static unsigned long       lastLimitPollMs         = 0;
+
+// ── Ethernet bring-up ──────────────────────────────────────────────────
+// Short, non-blocking-friendly timeouts: this is a bench tool, so a
+// missing cable shouldn't keep the operator waiting. If link/DHCP
+// don't come up, log it and continue — the motor menu still works.
+static const uint32_t ETH_LINK_TIMEOUT_MS = 3000;
+static const uint32_t ETH_DHCP_TIMEOUT_MS = 8000;
+
+static uint8_t netMac[6]  = {0};
+static bool    netLinkUp  = false;
+static bool    netDhcpOK  = false;
 
 // ── EEPROM helpers ──────────────────────────────────────────────────────
 
@@ -356,6 +383,7 @@ static void printMenu() {
     Serial.println(F("  Z      Set position = home (0), save to EEPROM"));
     Serial.println(F("  E / D  Enable / disable all motors"));
     Serial.println(F("  Q      Toggle idle auto-release (global, persisted)"));
+    Serial.println(F("  N      Print network status (backend, link, IP)"));
     Serial.println(F("  ?      Print status"));
     Serial.println(F("  H      Show this menu"));
     Serial.println();
@@ -377,6 +405,63 @@ static float readFloatFromSerial() {
     while (Serial.available()) Serial.read();
     Serial.println(val, 1);
     return val;
+}
+
+// ── Ethernet helpers ────────────────────────────────────────────────────
+
+#define IP_FMT      "%u.%u.%u.%u"
+#define IP_ARG(ip)  (ip)[0], (ip)[1], (ip)[2], (ip)[3]
+
+static void bringUpEthernet() {
+    net_hal::hw_mac(netMac);
+    Serial.printf("[net] backend = %s\n", net_hal::lib_name());
+    Serial.printf("[net] MAC     = %02X:%02X:%02X:%02X:%02X:%02X\n",
+                  netMac[0], netMac[1], netMac[2], netMac[3], netMac[4], netMac[5]);
+
+    if (!net_hal::begin()) {
+        Serial.println(F("[net] begin() returned false — PHY/cable problem?"));
+    }
+    netLinkUp = net_hal::wait_link(ETH_LINK_TIMEOUT_MS);
+    if (!netLinkUp) {
+        Serial.printf("[net] no link after %lu ms — cable unplugged? continuing.\n",
+                      (unsigned long)ETH_LINK_TIMEOUT_MS);
+        return;
+    }
+    const int speed = net_hal::link_speed_mbps();
+    if (speed > 0) {
+        Serial.printf("[net] link  = up, %d Mbps, %s\n",
+                      speed, net_hal::link_full_duplex() ? "full-duplex" : "half-duplex");
+    } else {
+        Serial.println(F("[net] link  = up (speed/duplex not reported by backend)"));
+    }
+
+    netDhcpOK = net_hal::wait_dhcp(ETH_DHCP_TIMEOUT_MS);
+    if (netDhcpOK) {
+        Serial.printf("[net] IP    = " IP_FMT "\n", IP_ARG(Ethernet.localIP()));
+        Serial.printf("[net] GW    = " IP_FMT "\n", IP_ARG(Ethernet.gatewayIP()));
+    } else {
+        Serial.printf("[net] DHCP timed out after %lu ms — continuing without IP.\n",
+                      (unsigned long)ETH_DHCP_TIMEOUT_MS);
+    }
+}
+
+static void printNetStatus() {
+    Serial.println(F("──── network ─────────────────────"));
+    Serial.printf ("Backend : %s\n", net_hal::lib_name());
+    Serial.printf ("MAC     : %02X:%02X:%02X:%02X:%02X:%02X\n",
+                   netMac[0], netMac[1], netMac[2], netMac[3], netMac[4], netMac[5]);
+    Serial.print  (F("Link    : "));
+    Serial.println(net_hal::link_state() ? F("UP") : F("DOWN"));
+    const int speed = net_hal::link_speed_mbps();
+    if (speed > 0) {
+        Serial.printf("          %d Mbps %s\n",
+                      speed, net_hal::link_full_duplex() ? "FDX" : "HDX");
+    }
+    Serial.printf ("IP      : " IP_FMT "\n", IP_ARG(Ethernet.localIP()));
+    Serial.printf ("Mask    : " IP_FMT "\n", IP_ARG(Ethernet.subnetMask()));
+    Serial.printf ("Gateway : " IP_FMT "\n", IP_ARG(Ethernet.gatewayIP()));
+    Serial.printf ("DNS     : " IP_FMT "\n", IP_ARG(Ethernet.dnsServerIP()));
+    Serial.println(F("──────────────────────────────────"));
 }
 
 // ── setup / loop ────────────────────────────────────────────────────────
@@ -419,6 +504,8 @@ void setup() {
     Serial.println(idleAutoRelease ? F("ON  (silent at rest)") : F("OFF (motor holds with current)"));
 
     for (int i = 0; i < NUM_AXES; i++) homeAxisOnBoot(*axes[i]);
+
+    bringUpEthernet();
 
     printMenu();
 }
@@ -564,6 +651,8 @@ void loop() {
         savePositionIfChanged(a);
         Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] position zeroed (declared home)."));
         break;
+
+    case 'N': case 'n': printNetStatus(); break;
 
     case '?':           printStatus(); break;
     case 'H': case 'h': printMenu();   break;
