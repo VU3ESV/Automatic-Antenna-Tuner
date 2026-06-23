@@ -155,7 +155,10 @@ firmware/tuner-controller/
   + jumper-driven defaults**. Pin numbers are derived from the upstream
   V2.07 schematic / `T41U5XBB_map.h` in grblHAL's iMXRT1062 source
   tree; we re-typeset them in our board file (factual data, not
-  copyrightable).
+  copyrightable). The full per-pin allocation, including which
+  carrier output drives K1/K2/K3 and which inputs serve as end-stops
+  and as the TX-key panic line, is documented in
+  [HW-T41-PINMAP.md](HW-T41-PINMAP.md).
 - The STM32H743 Phase-2 carrier (if/when built) gets its own
   `hal/board/stm32h743_tuner.{h,cpp}`. The application layer never
   notices the swap, per the firmware-portability rule.

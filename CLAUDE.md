@@ -35,7 +35,8 @@ Automatic-Antenna-Tuner/
 │   ├── HARDWARE.md      # BoM, schematic notes, wiring
 │   ├── PROTOCOL.md      # full WebSocket JSON protocol spec
 │   ├── RF-DESIGN.md     # network-topology theory, component sizing, detector chain
-│   └── HW-T41-CARRIER.md # plan: grblHAL-teensy 4.x V2.09 board as the carrier
+│   ├── HW-T41-CARRIER.md # plan: grblHAL-teensy 4.x V2.09 board as the carrier
+│   └── HW-T41-PINMAP.md  # Teensy 4.1 pin → V2.09 carrier net mapping (reference)
 ├── firmware/
 │   └── tuner-controller/  # MCU firmware (C/C++ on Teensy 4.1 or STM32H7)
 └── master/
