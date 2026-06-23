@@ -89,19 +89,72 @@ reuses them for its own operational signals.
 | 17   | CYCLE_START      | CYCLE START | Engage-from-bypass momentary input                |
 | 29   | SAFETY_DOOR      | SAFETY DOOR | Enclosure interlock — refuse motion if open       |
 
-## 4 · Auxiliary digital inputs (4× EMI-filtered, Schmitt-trigger)
+## 4 · Auxiliary digital inputs (5× EMI-filtered, Schmitt-trigger)
 
-| Pin  | grblHAL alias | Tuner use                                              |
-| ---- | ------------- | ------------------------------------------------------ |
-| 30   | AUXINPUT1 / QEI_A | X-axis encoder A (or motor-warning input)          |
-| 34   | AUXINPUT2 / QEI_B | X-axis encoder B                                   |
-| 35   | AUXINPUT3 / QEI_SELECT | spare encoder index / Z-pulse                 |
-| 36   | AUXINPUT0     | Motor-fault aggregate input from stepper drivers      |
-| 41   | AUXINPUT4 / I2C strobe | spare (I²C bus if a daughterboard is fitted) |
+These five pins are the carrier's only inputs fast enough for quadrature
+encoders — they feed the Teensy through an EMI-filter + Schmitt-trigger
+front end, not through the slow optocoupler chain used by the limit and
+GRBL-control inputs in §2 / §3. Call this the **tier-1 input bank**.
 
-The board multiplexes the QEI A/B/SELECT pins with AUXINPUT1/2/3 — they
-are the same physical pins. Use them as quadrature-encoder inputs for
-the X (and optionally Y) axis per [CLAUDE.md](../CLAUDE.md) invariant 3.
+| Pin  | grblHAL alias            | Tuner use                                         |
+| ---- | ------------------------ | ------------------------------------------------- |
+| 30   | AUXINPUT1 / QEI_A        | Axis-1 encoder A (Phase 2)                        |
+| 34   | AUXINPUT2 / QEI_B        | Axis-1 encoder B (Phase 2)                        |
+| 35   | AUXINPUT3 / QEI_SELECT   | Axis-1 encoder Z / index (Phase 2)                |
+| 36   | AUXINPUT0                | Motor-fault aggregate (default); axis-2 encoder A if repurposed |
+| 41   | AUXINPUT4 / I²C strobe   | spare (I²C bus if a daughterboard is fitted); axis-2 encoder B if repurposed |
+
+grblHAL's stock board map defines exactly one hardware-decoded
+quadrature slot — A=30, B=34, optional index=35 — intended as the
+single CNC MPG (manual-pulse-generator) jog wheel, not per-axis
+position feedback. The tuner-controller HAL provisions axis 1 the
+same way and allocates additional axes per the budget below.
+
+### 4.1 · Encoder pin budget (Phase 2)
+
+[CLAUDE.md](../CLAUDE.md) invariant #3 makes encoders the position
+truth when fitted. Per-axis encoders are an M5+ Phase-2 deliverable
+(see [HARDWARE.md](HARDWARE.md) BoM — "Position encoder"). The
+tier-1 input bank constrains how many axes the carrier can host
+directly:
+
+- **2 axes:** fits — A=30, B=34, index=35 on axis 1; A=36, B=41 on
+  axis 2 (no index). Costs the `MOTOR_FAULT` aggregate input (pin
+  36) and the I²C-strobe option (pin 41). Motor-fault aggregation
+  can be re-implemented as an external OR / wired-OR feeding a
+  spare opto input.
+- **3 axes** (full T/Pi-Match per-axis encoders): **does not fit**
+  on the tier-1 bank — short by at least one A/B pair. Pick one:
+
+  1. **External SPI quadrature counter** (LS7366R or HCTL-2032
+     class) on a small daughterboard, one chip per axis, daisy
+     chained on SPI. Counter handles edge counting at MHz rates;
+     differential RS-422 receivers on the daughterboard tolerate
+     long encoder cable runs. Carrier-side cost: SPI bus + one CS
+     per axis from the AUXOUTPUT bank (§5). **Recommended for
+     3-axis Phase 2.**
+  2. **Direct Teensy-header tap for the 3rd axis.** The carrier
+     exposes the Teensy 4.1 pin header; an unused GPIO can be
+     pulled off there with an external Schmitt-trigger / EMI
+     filter mounted near the connector. Cheaper than (1) but
+     adds risk and bypasses the carrier's RF-hardening intent.
+  3. **Equip only the most stall-prone axis** (typically the
+     roller inductor on a stiff gearbox), leave other axes
+     open-loop. Reduces the value of invariant #3's drift
+     detection but is the cheapest path.
+
+Note: the tier-2 opto-isolated inputs (limits §2, GRBL control §3)
+have ~50–100 µs propagation through their 6N137-class optocoupler
++ RC filter — max edge rate around 10 kHz. A 2000 CPR encoder
+loses edges past about 1 shaft-rev/s on those pins, so they are
+**not viable** as encoder inputs no matter how attractive the
+spare-pin count looks.
+
+The Teensy 4.1's hardware QuadTimer (TMR1–4, 4 channels each) plus
+the XBAR crossbar can route any of the tier-1 pins to a hardware
+quadrature decoder — no pin-mux constraint at the MCU layer. The
+constraint is the carrier's tier-1 pin count, not Teensy-side
+decode capacity.
 
 ## 5 · Relay-driver outputs (open-collector, 5 V/12 V coil jumper)
 
