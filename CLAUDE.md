@@ -319,3 +319,25 @@ Following the LP-100A-Server precedent so the station's services stay uniform:
   remains the station reference meter. The master MAY optionally subscribe
   to an LP-100A-Server instance for a second opinion (`[lp100a]` block in
   the TOML), but it is not required.
+
+## Notes for Claude (token-budget defaults)
+
+Bench-iteration sessions on this codebase tend to run for hours and
+accumulate large context (firmware + docs + protocol). To keep token
+spend in check:
+
+- **Direct work over subagents.** This repo is small enough to navigate
+  from the main loop. Spawn an Agent only for genuine multi-file
+  exploration; prefer the cheap `Explore` agent when you do. Don't
+  delegate three Read calls' worth of work.
+- **Read narrowly.** Big files (this CLAUDE.md, `docs/ARCHITECTURE.md`,
+  `firmware/*/src/main.cpp`) run 600+ lines. Use `grep` to locate the
+  section first, then `Read` with `offset` / `limit`. Never re-read a
+  file you just edited — the tool harness tracks state.
+- **Compact at PR-merge breakpoints when context crosses ~150k.**
+  Suggest `/compact` (or call it) after a PR merges and before the
+  next feature, not mid-task.
+- **Suggest `/clear` on topic pivots.** Stepper-bench debugging and
+  protocol-spec design share no useful context — say so when the user
+  pivots ("let's design the auto-tune algorithm now") rather than
+  letting the prior context ride.
