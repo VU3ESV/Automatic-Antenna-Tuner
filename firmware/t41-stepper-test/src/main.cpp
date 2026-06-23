@@ -143,6 +143,11 @@ struct Axis {
     // Limit-switch debounced state (HIGH = released, LOW = asserted)
     int           limitLastState  = HIGH;
 
+    // Boot-time homing: set true when startHomeOnBoot kicks off a move
+    // toward 0, cleared when the axis actually reaches 0 (or when the
+    // operator overrides with any other motion command).
+    bool          homing          = false;
+
     Axis(const char* n, uint8_t s, uint8_t d, uint8_t e, uint8_t l, int ee_addr)
         : name(n), pin_step(s), pin_dir(d), pin_en(e), pin_limit(l),
           ee_pos_addr(ee_addr),
@@ -278,11 +283,15 @@ static void savePositionIfChanged(Axis& a, bool quiet = false) {
     }
 }
 
+// Forward decl — body lives with the other homing helpers below.
+static void cancelHoming(Axis& a);
+
 static void moveRevolutions(Axis& a, int n, int dir) {
     if (!motorEnabled) {
         Serial.println(F("Motors disabled — enable first (E)."));
         return;
     }
+    cancelHoming(a);
     ensureDriverReady(a);
     long target = a.stepper.currentPosition() + (long)dir * n * STEPS_PER_REV;
     Serial.print(F("[")); Serial.print(a.name);
@@ -290,7 +299,12 @@ static void moveRevolutions(Axis& a, int n, int dir) {
     a.stepper.moveTo(target);
 }
 
-static void homeAxisOnBoot(Axis& a) {
+// Non-blocking: kick off a homing move to 0 and return immediately.
+// The main loop's serviceAxis() ticks stepper.run() forward; once
+// distanceToGo() reaches 0, we clear the flag and save the EEPROM
+// anchor. HTTP server is started BEFORE this so the browser sees the
+// position counter decrement live during the homing move.
+static void startHomeOnBoot(Axis& a) {
     long saved = a.stepper.currentPosition();
     if (saved == 0) {
         Serial.print(F("[")); Serial.print(a.name);
@@ -302,10 +316,19 @@ static void homeAxisOnBoot(Axis& a) {
     Serial.print(saved); Serial.println(F(" steps → 0 …"));
     ensureDriverReady(a);
     a.stepper.moveTo(0);
-    a.stepper.runToPosition();   // blocking
-    savePositionIfChanged(a);
-    Serial.print(F("[")); Serial.print(a.name);
-    Serial.println(F("] home reached (position = 0)."));
+    a.homing = true;
+}
+
+// Any operator-issued motion command must cancel a homing-in-progress
+// before changing the target — otherwise the "homing reached 0" check
+// in serviceAxis() never fires (target moved away from 0) and the
+// homing flag would persist forever.
+static void cancelHoming(Axis& a) {
+    if (a.homing) {
+        a.homing = false;
+        Serial.print(F("[")); Serial.print(a.name);
+        Serial.println(F("] homing cancelled by operator command."));
+    }
 }
 
 // ── Limit-switch monitor ────────────────────────────────────────────────
@@ -347,6 +370,17 @@ static void serviceAxis(Axis& a) {
         }
     } else {
         a.stepper.run();
+    }
+
+    // Homing-complete detection: target must be 0 AND we must actually
+    // be there. Operator-issued motion changes the target away from 0
+    // and is handled by cancelHoming() at the call sites; here we only
+    // succeed if the homing move completed untouched.
+    if (a.homing && a.stepper.distanceToGo() == 0 && a.stepper.currentPosition() == 0) {
+        a.homing = false;
+        savePositionIfChanged(a);
+        Serial.print(F("[")); Serial.print(a.name);
+        Serial.println(F("] home reached (position = 0)."));
     }
 
     bool nowRunning = a.continuousMode || a.stepper.distanceToGo() != 0;
@@ -517,6 +551,9 @@ input[type=number]{background:#222;color:#eee;border:1px solid #555;padding:.4em
 .la{color:#f44;font-weight:bold}
 .lr{color:#4f4}
 .sep{color:#555;margin:0 .4em}
+.hom{display:none;color:#000;background:#fc3;padding:.1em .55em;border-radius:.4em;font-size:.7em;margin-left:.5em;vertical-align:middle;font-weight:bold;animation:pulse 1s ease-in-out infinite}
+.hom.on{display:inline-block}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.55}}
 </style></head>
 <body>
 <h1>T41 Bench — X/Y stepper</h1>
@@ -554,7 +591,7 @@ function render(s){
       const d=document.createElement('div');
       d.className='axis';d.id='ax-'+a.name;
       d.innerHTML=`
-<h2><span class="axname">${a.name}</span> axis <span class="sel"></span></h2>
+<h2><span class="axname">${a.name}</span> axis <span class="sel"></span><span class="hom">HOMING</span></h2>
 <div class="kv">pos <b class="pos">?</b> steps <span class="sep">·</span> spd <b class="spd">?</b> <span class="sep">·</span> accel <b class="acc">?</b> <span class="sep">·</span> cont <b class="con">?</b> <span class="sep">·</span> limit <span class="lim">?</span></div>
 <div class="row">
   <button onclick="cmd('/api/select?axis=${a.name}')">Select</button>
@@ -586,6 +623,7 @@ function render(s){
     if(!d)continue;
     d.classList.toggle('active',a.selected);
     d.querySelector('.sel').textContent=a.selected?'(active)':'';
+    d.querySelector('.hom').classList.toggle('on',!!a.homing);
     d.querySelector('.pos').textContent=a.position;
     d.querySelector('.spd').textContent=a.speed;
     d.querySelector('.acc').textContent=a.accel;
@@ -599,7 +637,12 @@ function render(s){
     if(document.activeElement!==ai)ai.value=a.accel;
   }
 }
-poll();setInterval(poll,500);
+// 1000 ms — every HTTP round-trip blocks the main loop for a few ms
+// during write+flush, which stalls AccelStepper's pulse generator and
+// shows up as a visible motor stutter. Slower polling halves the
+// hitches. Real fix is hardware pulse generation per CLAUDE.md
+// "Firmware portability rule".
+poll();setInterval(poll,1000);
 </script>
 </body></html>)HTML";
 
@@ -708,10 +751,11 @@ static void httpServeStatusJson(EthernetClient &c) {
         const char *lim  = a.limitLastState == LOW ? "ASSERTED" : "released";
         n += snprintf(json + n, sizeof(json) - n,
             "%s{\"name\":\"%s\",\"position\":%ld,\"speed\":%.0f,\"accel\":%.0f,"
-            "\"continuous\":\"%s\",\"limit\":\"%s\",\"selected\":%s}",
+            "\"continuous\":\"%s\",\"limit\":\"%s\",\"selected\":%s,\"homing\":%s}",
             i > 0 ? "," : "",
             a.name, a.stepper.currentPosition(), a.currentSpeed, a.currentAccel,
-            cont, lim, (&a == selected) ? "true" : "false");
+            cont, lim, (&a == selected) ? "true" : "false",
+            a.homing ? "true" : "false");
     }
     n += snprintf(json + n, sizeof(json) - n, "]}");
     httpSendHeader(c, 200, "OK", "application/json", n);
@@ -724,6 +768,7 @@ static void httpServeStatusJson(EthernetClient &c) {
 
 static bool webJog(Axis &a, int dir) {
     if (!motorEnabled) return false;
+    cancelHoming(a);
     ensureDriverReady(a);
     a.continuousMode = false;
     a.stepper.move((long)dir * 100);
@@ -734,10 +779,12 @@ static bool webJog(Axis &a, int dir) {
 
 static bool webContinuous(Axis &a, int dir) {
     if (dir == 0) {
+        cancelHoming(a);
         a.continuousMode = false;
         return true;
     }
     if (!motorEnabled) return false;
+    cancelHoming(a);
     ensureDriverReady(a);
     a.continuousMode = true;
     a.continuousDir  = dir > 0 ? +1 : -1;
@@ -805,6 +852,7 @@ static void httpDispatch(EthernetClient &c, const char *path, const char *query)
     if (strcmp(path, "/api/stop") == 0) {
         Axis *a = getParam(query, "axis", axisName, sizeof(axisName)) ? findAxis(axisName) : nullptr;
         if (!a) { httpSendText(c, 400, "Bad Request", "bad axis\n"); return; }
+        cancelHoming(*a);
         a->continuousMode = false;
         a->stepper.stop();
         httpSendText(c, 200, "OK", "stop\n"); return;
@@ -813,6 +861,7 @@ static void httpDispatch(EthernetClient &c, const char *path, const char *query)
     if (strcmp(path, "/api/estop") == 0) {
         Axis *a = getParam(query, "axis", axisName, sizeof(axisName)) ? findAxis(axisName) : nullptr;
         if (!a) { httpSendText(c, 400, "Bad Request", "bad axis\n"); return; }
+        cancelHoming(*a);
         a->continuousMode = false;
         a->stepper.setCurrentPosition(a->stepper.currentPosition());  // zero velocity
         httpSendText(c, 200, "OK", "estop\n"); return;
@@ -821,6 +870,7 @@ static void httpDispatch(EthernetClient &c, const char *path, const char *query)
     if (strcmp(path, "/api/zero") == 0) {
         Axis *a = getParam(query, "axis", axisName, sizeof(axisName)) ? findAxis(axisName) : nullptr;
         if (!a) { httpSendText(c, 400, "Bad Request", "bad axis\n"); return; }
+        cancelHoming(*a);
         a->stepper.setCurrentPosition(0);
         savePositionIfChanged(*a);
         httpSendText(c, 200, "OK", "zeroed\n"); return;
@@ -979,8 +1029,11 @@ void setup() {
     Serial.print(F("Idle auto-release: "));
     Serial.println(idleAutoRelease ? F("ON  (silent at rest)") : F("OFF (motor holds with current)"));
 
-    for (int i = 0; i < NUM_AXES; i++) homeAxisOnBoot(*axes[i]);
-
+    // Ethernet + HTTP BEFORE homing so the browser sees position
+    // counters decrement live during the boot-time homing move,
+    // rather than freezing on the pre-reboot value until homing
+    // completes. startHomeOnBoot below is non-blocking — the main
+    // loop's serviceAxis() ticks the move forward.
     bringUpEthernet();
     if (netDhcpOK) {
         httpServer.begin();
@@ -991,6 +1044,8 @@ void setup() {
     } else {
         Serial.println(F("[http] not started (no DHCP)."));
     }
+
+    for (int i = 0; i < NUM_AXES; i++) startHomeOnBoot(*axes[i]);
 
     printMenu();
 }
@@ -1035,6 +1090,7 @@ void loop() {
         break;
     }
     case '5':
+        cancelHoming(a);
         a.continuousMode = false;
         if (!motorEnabled) { Serial.println(F("Motors disabled — enable first (E).")); break; }
         ensureDriverReady(a);
@@ -1046,6 +1102,7 @@ void loop() {
         a.wasRunning = false;
         break;
     case '6':
+        cancelHoming(a);
         a.continuousMode = false;
         if (!motorEnabled) { Serial.println(F("Motors disabled — enable first (E).")); break; }
         ensureDriverReady(a);
@@ -1061,6 +1118,7 @@ void loop() {
             a.continuousMode = false;
             Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] continuous CW stopped."));
         } else {
+            cancelHoming(a);
             ensureDriverReady(a);
             a.continuousMode = true;
             a.continuousDir = +1;
@@ -1074,6 +1132,7 @@ void loop() {
             a.continuousMode = false;
             Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] continuous CCW stopped."));
         } else {
+            cancelHoming(a);
             ensureDriverReady(a);
             a.continuousMode = true;
             a.continuousDir = -1;
@@ -1083,11 +1142,13 @@ void loop() {
         }
         break;
     case '9':
+        cancelHoming(a);
         a.continuousMode = false;
         a.stepper.stop();
         Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] STOP — decelerating."));
         break;
     case '0':
+        cancelHoming(a);
         a.continuousMode = false;
         a.stepper.setCurrentPosition(a.stepper.currentPosition());   // zero velocity
         Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] EMERGENCY STOP."));
@@ -1133,6 +1194,7 @@ void loop() {
         }
         break;
     case 'Z': case 'z':
+        cancelHoming(a);
         a.stepper.setCurrentPosition(0);
         savePositionIfChanged(a);
         Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] position zeroed (declared home)."));
