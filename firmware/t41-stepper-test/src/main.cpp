@@ -50,16 +50,24 @@
 #include <AccelStepper.h>
 #include <EEPROM.h>
 
-// ── Pin assignments — V2.09 carrier (from docs/HW-T41-PINMAP.md) ────────
-static const uint8_t PIN_X_STEP  = 2;
-static const uint8_t PIN_X_DIR   = 3;
-static const uint8_t PIN_X_EN    = 10;
-static const uint8_t PIN_X_LIMIT = 20;
+// Pin map for the V2.09 carrier lives with the production tuner-
+// controller HAL so bench and production share one source of truth.
+// Bench's platformio.ini adds an -I onto firmware/tuner-controller/
+// src/hal/board/ to make this include resolve.
+#include "t41_v209.h"
 
-static const uint8_t PIN_Y_STEP  = 4;
-static const uint8_t PIN_Y_DIR   = 5;
-static const uint8_t PIN_Y_EN    = 40;
-static const uint8_t PIN_Y_LIMIT = 21;
+// ── Pin assignments — V2.09 carrier (from docs/HW-T41-PINMAP.md) ────────
+namespace board = hal::board::t41_v209;
+
+static constexpr uint8_t PIN_X_STEP  = board::AXIS_X.step;
+static constexpr uint8_t PIN_X_DIR   = board::AXIS_X.dir;
+static constexpr uint8_t PIN_X_EN    = board::AXIS_X.en;
+static constexpr uint8_t PIN_X_LIMIT = board::AXIS_X.limit;
+
+static constexpr uint8_t PIN_Y_STEP  = board::AXIS_Y.step;
+static constexpr uint8_t PIN_Y_DIR   = board::AXIS_Y.dir;
+static constexpr uint8_t PIN_Y_EN    = board::AXIS_Y.en;
+static constexpr uint8_t PIN_Y_LIMIT = board::AXIS_Y.limit;
 
 // ── Defaults (match your driver's micro-stepping setting) ───────────────
 static const int   STEPS_PER_REV = 1600;   // 1/8 micro-stepping on a 1.8° motor
@@ -179,13 +187,20 @@ static void setEnaPin(Axis& a, bool level) {
     Serial.println(level ? F("HIGH") : F("LOW"));
 }
 
+// EN polarity comes from the carrier-board pin map. With opto-isolated
+// drivers (TMC2209 / DM542 / TB6600) EN_ACTIVE_LOW = true, so the
+// "enable" level on the Teensy pin is LOW. Centralised here so a
+// future driver family with the opposite polarity is a one-line flip.
+static constexpr uint8_t EN_LEVEL_ENABLED  = board::EN_ACTIVE_LOW ? LOW  : HIGH;
+static constexpr uint8_t EN_LEVEL_DISABLED = board::EN_ACTIVE_LOW ? HIGH : LOW;
+
 static void enableAxisDriver(Axis& a, bool on) {
-    digitalWrite(a.pin_en, on ? LOW : HIGH);   // active-LOW
+    digitalWrite(a.pin_en, on ? EN_LEVEL_ENABLED : EN_LEVEL_DISABLED);
     a.driverReleased = false;
 }
 
 static void releaseDriverForIdle(Axis& a) {
-    digitalWrite(a.pin_en, HIGH);
+    digitalWrite(a.pin_en, EN_LEVEL_DISABLED);
     a.driverReleased = true;
     Serial.print(F("[")); Serial.print(a.name);
     Serial.println(F("] idle — driver released (silent)"));
@@ -193,7 +208,7 @@ static void releaseDriverForIdle(Axis& a) {
 
 static void ensureDriverReady(Axis& a) {
     if (!motorEnabled || !a.driverReleased) return;
-    digitalWrite(a.pin_en, LOW);
+    digitalWrite(a.pin_en, EN_LEVEL_ENABLED);
     a.driverReleased = false;
     delay(REENGAGE_SETTLE_MS);
     Serial.print(F("[")); Serial.print(a.name);
@@ -379,7 +394,7 @@ void setup() {
         pinMode(a.pin_limit, INPUT_PULLUP);
         a.limitLastState = digitalRead(a.pin_limit);
 
-        a.stepper.setMinPulseWidth(5);
+        a.stepper.setMinPulseWidth(board::STEP_MIN_PULSE_US);
         a.stepper.setMaxSpeed(a.currentSpeed);
         a.stepper.setAcceleration(a.currentAccel);
 
