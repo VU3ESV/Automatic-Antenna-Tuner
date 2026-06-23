@@ -903,6 +903,14 @@ static void httpPoll() {
     } else {
         httpDispatch(client, path, query);
     }
+    // CRITICAL: flush before stop. NativeEthernet's EthernetClient::
+    // stop() does socketDisconnect + socketClose immediately and
+    // discards anything still in FNET's send buffer — so a fully-
+    // written response is dropped on the floor and the client (browser
+    // / curl) sees a clean TCP close with 0 bytes. flush() blocks
+    // until all outgoing bytes are ACK'd by the peer. QNEthernet
+    // doesn't have the same bug but the flush is harmless there.
+    client.flush();
     client.stop();
 }
 
