@@ -1,0 +1,12 @@
+{
+  "name": "net_hal",
+  "version": "0.1.0",
+  "description": "Ethernet HAL shim for the Automatic Antenna Tuner firmware. Compile-time-selects between Shawn Silverman's QNEthernet (lwIP) and vjmuzik's NativeEthernet (FNET), exposing a single net_hal::* API + backend-neutral EthernetServer / EthernetClient / EthernetUDP type aliases. The consuming sketch picks the backend by defining exactly one of TUNER_NET_QNETHERNET or TUNER_NET_NATIVEETHERNET via platformio.ini build_flags and adding the matching library to its lib_deps.",
+  "keywords": "ethernet, qnethernet, nativeethernet, teensy, hal",
+  "frameworks": "arduino",
+  "platforms": "teensy",
+  "build": {
+    "srcFilter": ["+<*>"],
+    "libLDFMode": "chain+"
+  }
+}
