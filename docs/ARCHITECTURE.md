@@ -524,6 +524,66 @@ a 2000 CPR encoder, ~0.25 % of one revolution), the controller:
    `level:warn` — likely indicates mechanical slip, encoder noise, or
    a step-pulse generation problem worth investigating.
 
+#### 5.2.5 Mechanical safety stack (protecting the vacuum cap)
+
+TB6600 is open-loop and exposes no stall-feedback signal (no
+StallGuard-equivalent), so the firmware cannot trust the step
+counter to mean "the rotor actually moved that far". A vacuum-
+variable capacitor is unforgiving — past its mechanical stop the
+bellows or the lead-screw can fracture. Cap protection is by
+concentric envelopes, not by trusting any single mechanism. Listed
+outermost to innermost, all are enforced from M1b.2 onward unless
+noted:
+
+1. **Driver current dip-switch set to motor-rated, not max** (M1b.2
+   commissioning step). The motor stalls before it can build enough
+   torque to break the gearbox or the cap.
+
+2. **No motion under RF** (invariant 1) — eliminates the highest-risk
+   EMI-induced step-loss window (TX keyed, driver opto under noise)
+   by refusing motion at all in that state.
+
+3. **`homed:false` refuses motion** (invariant 3). Until `home` has
+   run once this power cycle or a clean-shutdown NVRAM record proves
+   anchoring, all motion verbs other than `home` are refused. This
+   prevents a corrupt or stale step counter from issuing an
+   out-of-envelope command.
+
+4. **Per-axis software soft limits** derived from `home`. Once the
+   homing routine has established the limit-switch positions at both
+   ends of travel, the HAL refuses any commanded move outside
+   `[home_low + SAFE_MARGIN, home_high − SAFE_MARGIN]` (default
+   margin: 100 steps inside the switch position). The soft limits
+   sit inside the limit switches, which sit inside the mechanical
+   stops — three concentric envelopes.
+
+5. **Per-axis mechanical limit switch** on the V2.09 carrier opto
+   inputs (X→20, Y→21, Z→22 — see
+   [docs/HW-T41-PINMAP.md](HW-T41-PINMAP.md) §2). Hit inside the
+   cap's own mechanical hard stop, latched in firmware, the move
+   halts immediately. This is the only hardware fallback the
+   firmware has against a runaway pulse train if the soft limit is
+   wrong (mis-calibration) or the step counter has drifted past it
+   undetected.
+
+6. **Optional rear-shaft encoder** (per-axis,
+   [HARDWARE.md](HARDWARE.md) §"BoM"). When fitted, post-move
+   step-vs-encoder reconciliation in §5.2.4 detects stalls the
+   open-loop counter cannot see; ≥3 resync events in 10 min
+   escalates to `level:warn` so a mechanical problem doesn't
+   quietly destroy a cap over hours. Phase 1 ships without
+   encoders — the M5 RF commissioning go/no-go decision in
+   [PLAN.md](PLAN.md) determines whether stalls observed at full
+   power justify adding them per axis.
+
+The first install-time commissioning **must map each limit-switch
+position to a safe number of steps inside the cap's mechanical
+stop, both ends**. That mapping is per-build and not derivable from
+the schematic — it is an M1b.2 calibration step recorded in NVRAM
+alongside the rest of the per-axis configuration. The soft-limit
+constants (`home_low`, `home_high`, `SAFE_MARGIN`) live with the
+per-axis topology block, not in the HAL board header.
+
 ### 5.3 Master controller (Go, runs on Pi)
 
 One process, four goroutines, one shared state — same shape as
@@ -625,7 +685,8 @@ the CAT poller and SQLite memory store.
 | Tuner controller WS drops                | Master shows red pill, reconnects 1 s → 30 s. Operator sees stale state with timestamp.   |
 | RF detected during commanded motion      | Controller halts steppers within 1 ms, latches K3 bypass, emits `status:warn`. Master shows lockout banner; recall/auto-tune disabled until Fwd ≤ threshold for 3 s. |
 | Encoder count diverges from step counter | Controller treats encoder as truth (§5.2.4), re-syncs step counter, emits `status:info enc_resync`. ≥3 events in 10 min → `status:warn`. |
-| Stepper stall (StallGuard)               | During homing: normal end-of-travel signal (§5.2.2). Outside homing: controller halts, emits `status:warn stall`. Operator runs `home`. |
+| Stepper stall detected                   | TB6600 has no stall signal — detection is by post-move step-vs-encoder reconciliation (§5.2.4), only if a rear-shaft encoder is fitted on that axis. Phase 1 has no encoders, so silent stalls are caught only when they reach the limit switch (§5.2.5 layer 5) or when the operator notices SWR diverging from the saved memory. |
+| Limit switch hit outside homing          | A move ran into the mechanical limit switch (§5.2.5 layer 5). Controller halts the axis immediately, latches the axis as `homed:false`, emits `status:warn limit_hit`. Operator runs `home` and investigates — soft limit was wrong or step counter drifted. |
 | Cold boot with unclean NVRAM             | Controller refuses motion verbs except `home`; emits `status:warn` and runs auto-home on next `home` command. `homed:false` in state until complete (§5.2.2). |
 | Cold boot with absolute encoder mismatch | (If absolute SSI used) controller compares the SSI reading against the last persisted count; >0.5 % drift emits `status:warn` and forces a homing crosscheck. |
 | K1+K2 both reading closed                | Hardware fault. Controller drops K1+K2, latches K3, refuses motion, emits `status:error relay_fault`.|

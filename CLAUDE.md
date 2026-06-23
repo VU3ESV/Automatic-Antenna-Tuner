@@ -161,6 +161,18 @@ Phase-2 deliverable (see [docs/PLAN.md](docs/PLAN.md)).
    bucket within band (default 25 kHz on 160/80/60/40 m, 50 kHz on
    30/20/17/15/12 m, 100 kHz on 10/6 m). Falling back to band-only
    defaults is a last resort.
+7. **Vacuum-variable cap is protected by a defence-in-depth stack, not
+   by trusting the stepper.** TB6600 is open-loop with no stall feedback.
+   The firmware MUST enforce, in order: driver current set to motor-rated
+   (not max) at commissioning; refusal of all motion verbs except `home`
+   while `homed:false`; per-axis software soft limits sitting
+   `SAFE_MARGIN` steps inside the limit-switch position (default 100);
+   per-axis mechanical limit switch as the hardware fallback;
+   optional rear-shaft encoder for post-move stall detection when fitted.
+   The first install-time commissioning must map each limit-switch
+   position to a safe number of steps inside the cap's mechanical
+   stop, both ends, and persist it to NVRAM with the per-axis topology
+   block. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §5.2.5.
 
 ## WebSocket protocol (summary; full spec in [docs/PROTOCOL.md](docs/PROTOCOL.md))
 

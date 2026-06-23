@@ -52,6 +52,25 @@ per-subsystem rationale and detector / driver notes.
 Power budget, voltage tree, and HV-bias supply for the vacuum
 relays are TBD in §2.
 
+### Cap-safety stack (why the BoM looks this way)
+
+TB6600 has no stall-feedback signal (no StallGuard-equivalent), so a
+vacuum-variable capacitor cannot be protected by trusting the step
+counter. Protection is by layered envelopes — driver current
+dip-switch set to motor-rated → `homed:false` motion refusal →
+per-axis software soft limits (default 100 steps inside the
+switch) → per-axis mechanical limit switch on the V2.09 carrier
+opto inputs → optional rear-shaft encoder for post-move stall
+reconciliation. Full enforcement contract in
+[`../CLAUDE.md`](../CLAUDE.md) invariant #7; architectural rationale
+and layer-by-layer behaviour in
+[`ARCHITECTURE.md`](ARCHITECTURE.md) §5.2.5.
+
+The per-build calibration that ties layers 3 and 4 together — the
+step counts of `home_low`, `home_high`, and the `SAFE_MARGIN`
+inside each limit switch — is an M1b.2 commissioning step and
+lands in §9 below when it gets written up.
+
 ## Sections to fill in
 
 These are written incrementally as the build proceeds:
