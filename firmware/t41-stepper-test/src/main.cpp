@@ -70,7 +70,6 @@
 //   - POC level: no automatic motion-refusal logic — operator-visible only.
 
 #include <Arduino.h>
-#include <AccelStepper.h>
 #include <EEPROM.h>
 
 // Pin map for the V2.09 carrier lives with the production tuner-
@@ -83,6 +82,12 @@
 // at compile time via the env's build_flags. Same source compiles
 // against either backend. See firmware/lib/net_hal/.
 #include "net_hal.h"
+
+// Hardware-timed stepper driver. Replaces AccelStepper's loop()-polled
+// runSpeed() pattern with FlexPWM-generated pulse trains + ISR step
+// counting so motion is immune to main-loop blocking (HTTP flush/stop,
+// Serial prints, EEPROM writes).
+#include "flexpwm_stepper.h"
 
 // ── Pin assignments — V2.09 carrier (from docs/HW-T41-PINMAP.md) ────────
 namespace board = hal::board::t41_v209;
@@ -114,48 +119,60 @@ static const uint32_t NVS_MAGIC_V2     = 0x41544132UL;  // 'ATA2' — recognises
 // ── Per-axis state ──────────────────────────────────────────────────────
 
 struct Axis {
-    const char*   name;
-    uint8_t       pin_step;
-    uint8_t       pin_dir;
-    uint8_t       pin_en;
-    uint8_t       pin_limit;
-    int           ee_pos_addr;
-    AccelStepper  stepper;
+    const char*       name;
+    uint8_t           pin_step;
+    uint8_t           pin_dir;
+    uint8_t           pin_en;
+    uint8_t           pin_limit;
+    int               ee_pos_addr;
+    FlexPwmStepper    stepper;
 
     // Position-persistence state
-    long          lastSavedPos    = 0;
-    unsigned long lastContSaveMs  = 0;
+    long              lastSavedPos    = 0;
+    unsigned long     lastContSaveMs  = 0;
 
     // Idle / motion tracking
-    bool          driverReleased  = false;
-    unsigned long lastMotionMs    = 0;
-    bool          wasRunning      = false;
+    bool              driverReleased  = false;
+    unsigned long     lastMotionMs    = 0;
+    bool              wasRunning      = false;
 
     // Continuous-mode state
-    bool          continuousMode  = false;
-    int           continuousDir   = 1;
-    long          lastReportedRev = 0;
+    bool              continuousMode  = false;
+    int               continuousDir   = 1;
+    long              lastReportedRev = 0;
 
-    // Per-axis motion settings (applied to the AccelStepper)
-    float         currentSpeed    = 800.0f;
-    float         currentAccel    = 400.0f;
+    // Per-axis motion settings. Accel is no-op on FlexPwmStepper —
+    // motor runs at constant velocity — but kept on the struct so the
+    // JSON / serial menu / set-accel command paths still have a place
+    // to store it (display-only; no longer applied to the driver).
+    float             currentSpeed    = 800.0f;
+    float             currentAccel    = 400.0f;
 
     // Limit-switch debounced state (HIGH = released, LOW = asserted)
-    int           limitLastState  = HIGH;
+    int               limitLastState  = HIGH;
 
     // Boot-time homing: set true when startHomeOnBoot kicks off a move
     // toward 0, cleared when the axis actually reaches 0 (or when the
     // operator overrides with any other motion command).
-    bool          homing          = false;
+    bool              homing          = false;
 
-    Axis(const char* n, uint8_t s, uint8_t d, uint8_t e, uint8_t l, int ee_addr)
+    Axis(const char* n, uint8_t s, uint8_t d, uint8_t e, uint8_t l, int ee_addr,
+         IMXRT_FLEXPWM_t* pwm, uint8_t submodule, IRQ_NUMBER_t irq)
         : name(n), pin_step(s), pin_dir(d), pin_en(e), pin_limit(l),
           ee_pos_addr(ee_addr),
-          stepper(AccelStepper::DRIVER, s, d) {}
+          stepper(s, d, pwm, submodule, irq) {}
 };
 
-static Axis xAxis("X", PIN_X_STEP, PIN_X_DIR, PIN_X_EN, PIN_X_LIMIT, EE_ADDR_POS_X);
-static Axis yAxis("Y", PIN_Y_STEP, PIN_Y_DIR, PIN_Y_EN, PIN_Y_LIMIT, EE_ADDR_POS_Y);
+// FlexPWM submodule assignment per axis — see docs/HW-T41-PINMAP.md §1.
+// Pin 2 (X STEP) is FlexPWM4 submodule 2; pin 4 (Y STEP) is FlexPWM2
+// submodule 0. Different peripherals → independent step trains, no
+// contention. If you ever wire Z/M3/M4 STEP pins, add the right
+// (pwm, submodule, irq) triple here AND a dispatch slot in
+// flexpwm_stepper.cpp.
+static Axis xAxis("X", PIN_X_STEP, PIN_X_DIR, PIN_X_EN, PIN_X_LIMIT, EE_ADDR_POS_X,
+                  &IMXRT_FLEXPWM4, 2, IRQ_FLEXPWM4_2);
+static Axis yAxis("Y", PIN_Y_STEP, PIN_Y_DIR, PIN_Y_EN, PIN_Y_LIMIT, EE_ADDR_POS_Y,
+                  &IMXRT_FLEXPWM2, 0, IRQ_FLEXPWM2_0);
 static Axis* const axes[] = { &xAxis, &yAxis };
 static const int NUM_AXES = sizeof(axes) / sizeof(axes[0]);
 static Axis* selected = &xAxis;
@@ -273,7 +290,7 @@ static void enableAll(bool on) {
 }
 
 static void savePositionIfChanged(Axis& a, bool quiet = false) {
-    long p = a.stepper.currentPosition();
+    long p = a.stepper.position();
     if (p == a.lastSavedPos) return;
     nvsSavePosition(a.ee_pos_addr, p);
     a.lastSavedPos = p;
@@ -293,19 +310,20 @@ static void moveRevolutions(Axis& a, int n, int dir) {
     }
     cancelHoming(a);
     ensureDriverReady(a);
-    long target = a.stepper.currentPosition() + (long)dir * n * STEPS_PER_REV;
+    long target = a.stepper.position() + (long)dir * n * STEPS_PER_REV;
     Serial.print(F("[")); Serial.print(a.name);
     Serial.print(F("] moving to ")); Serial.print(target); Serial.println(F(" steps …"));
+    a.stepper.setSpeed((uint32_t)a.currentSpeed);
     a.stepper.moveTo(target);
 }
 
 // Non-blocking: kick off a homing move to 0 and return immediately.
-// The main loop's serviceAxis() ticks stepper.run() forward; once
-// distanceToGo() reaches 0, we clear the flag and save the EEPROM
-// anchor. HTTP server is started BEFORE this so the browser sees the
-// position counter decrement live during the homing move.
+// FlexPWM emits the pulse train autonomously; the reload-IRQ ticks
+// position() down to 0 and stops. HTTP server is started BEFORE this
+// so the browser sees the position counter decrement live during the
+// homing move.
 static void startHomeOnBoot(Axis& a) {
-    long saved = a.stepper.currentPosition();
+    long saved = a.stepper.position();
     if (saved == 0) {
         Serial.print(F("[")); Serial.print(a.name);
         Serial.println(F("] already at home (0)."));
@@ -315,6 +333,7 @@ static void startHomeOnBoot(Axis& a) {
     Serial.print(F("] homing: driving from "));
     Serial.print(saved); Serial.println(F(" steps → 0 …"));
     ensureDriverReady(a);
+    a.stepper.setSpeed((uint32_t)a.currentSpeed);
     a.stepper.moveTo(0);
     a.homing = true;
 }
@@ -350,17 +369,20 @@ static void pollLimits() {
 // ── Per-axis service (call once per loop) ───────────────────────────────
 
 static void serviceAxis(Axis& a) {
+    // No more stepper.run() / runSpeed() calls — FlexPWM generates
+    // pulses autonomously and the reload ISR keeps position() current.
+    // serviceAxis is now just observability: rev counter, throttled
+    // position-save, homing-complete + post-move save bookkeeping.
+
     if (a.continuousMode) {
-        a.stepper.setSpeed(a.continuousDir > 0 ? a.currentSpeed : -a.currentSpeed);
-        a.stepper.runSpeed();
-        long rev = a.stepper.currentPosition() / STEPS_PER_REV;
+        long rev = a.stepper.position() / STEPS_PER_REV;
         if (rev != a.lastReportedRev) {
             a.lastReportedRev = rev;
             Serial.print(F("[")); Serial.print(a.name);
             Serial.print(F("] Rev "));
             if (rev > 0) Serial.print('+');
             Serial.print(rev);
-            Serial.print(F("  (")); Serial.print(a.stepper.currentPosition());
+            Serial.print(F("  (")); Serial.print(a.stepper.position());
             Serial.println(F(" steps)"));
         }
         unsigned long now = millis();
@@ -368,22 +390,20 @@ static void serviceAxis(Axis& a) {
             a.lastContSaveMs = now;
             savePositionIfChanged(a, true /*quiet*/);
         }
-    } else {
-        a.stepper.run();
     }
 
     // Homing-complete detection: target must be 0 AND we must actually
     // be there. Operator-issued motion changes the target away from 0
     // and is handled by cancelHoming() at the call sites; here we only
     // succeed if the homing move completed untouched.
-    if (a.homing && a.stepper.distanceToGo() == 0 && a.stepper.currentPosition() == 0) {
+    if (a.homing && !a.stepper.isRunning() && a.stepper.position() == 0) {
         a.homing = false;
         savePositionIfChanged(a);
         Serial.print(F("[")); Serial.print(a.name);
         Serial.println(F("] home reached (position = 0)."));
     }
 
-    bool nowRunning = a.continuousMode || a.stepper.distanceToGo() != 0;
+    bool nowRunning = a.continuousMode || a.stepper.isRunning();
     if (a.wasRunning && !nowRunning) {
         savePositionIfChanged(a);
         a.lastMotionMs = millis();
@@ -407,7 +427,7 @@ static void printStatus() {
     for (int i = 0; i < NUM_AXES; i++) {
         Axis& a = *axes[i];
         Serial.print(F("[")); Serial.print(a.name); Serial.println(F("]"));
-        Serial.print(F("  position    : ")); Serial.print(a.stepper.currentPosition()); Serial.println(F(" steps"));
+        Serial.print(F("  position    : ")); Serial.print(a.stepper.position()); Serial.println(F(" steps"));
         Serial.print(F("  speed       : ")); Serial.print(a.currentSpeed, 0); Serial.println(F(" steps/s"));
         Serial.print(F("  accel       : ")); Serial.print(a.currentAccel, 0); Serial.println(F(" steps/s²"));
         Serial.print(F("  continuous  : "));
@@ -753,7 +773,7 @@ static void httpServeStatusJson(EthernetClient &c) {
             "%s{\"name\":\"%s\",\"position\":%ld,\"speed\":%.0f,\"accel\":%.0f,"
             "\"continuous\":\"%s\",\"limit\":\"%s\",\"selected\":%s,\"homing\":%s}",
             i > 0 ? "," : "",
-            a.name, a.stepper.currentPosition(), a.currentSpeed, a.currentAccel,
+            a.name, a.stepper.position(), a.currentSpeed, a.currentAccel,
             cont, lim, (&a == selected) ? "true" : "false",
             a.homing ? "true" : "false");
     }
@@ -762,16 +782,17 @@ static void httpServeStatusJson(EthernetClient &c) {
     writeAll(c, reinterpret_cast<const uint8_t *>(json), n);
 }
 
-// ---- Non-blocking motion variants for HTTP -----------------------------
-// Same outcome as the Serial menu, but no runToPosition() so the HTTP
-// handler returns immediately. serviceAxis() ticks the move forward.
+// ---- HTTP motion helpers (FlexPWM-backed, non-blocking by design) ------
+// All FlexPwmStepper calls are non-blocking — they just configure the
+// submodule and return — so HTTP and Serial paths look the same.
 
 static bool webJog(Axis &a, int dir) {
     if (!motorEnabled) return false;
     cancelHoming(a);
     ensureDriverReady(a);
     a.continuousMode = false;
-    a.stepper.move((long)dir * 100);
+    a.stepper.setSpeed((uint32_t)a.currentSpeed);
+    a.stepper.moveSteps((long)dir * 100);
     a.lastMotionMs = millis();
     a.wasRunning = true;
     return true;
@@ -781,15 +802,18 @@ static bool webContinuous(Axis &a, int dir) {
     if (dir == 0) {
         cancelHoming(a);
         a.continuousMode = false;
+        a.stepper.stop();
         return true;
     }
     if (!motorEnabled) return false;
     cancelHoming(a);
     ensureDriverReady(a);
-    a.continuousMode = true;
-    a.continuousDir  = dir > 0 ? +1 : -1;
-    a.lastReportedRev = a.stepper.currentPosition() / STEPS_PER_REV;
+    a.continuousMode  = true;
+    a.continuousDir   = dir > 0 ? +1 : -1;
+    a.lastReportedRev = a.stepper.position() / STEPS_PER_REV;
     a.lastContSaveMs  = millis();
+    a.stepper.setSpeed((uint32_t)a.currentSpeed);
+    a.stepper.runContinuous(a.continuousDir);
     return true;
 }
 
@@ -863,7 +887,7 @@ static void httpDispatch(EthernetClient &c, const char *path, const char *query)
         if (!a) { httpSendText(c, 400, "Bad Request", "bad axis\n"); return; }
         cancelHoming(*a);
         a->continuousMode = false;
-        a->stepper.setCurrentPosition(a->stepper.currentPosition());  // zero velocity
+        a->stepper.stop();   // FlexPWM is constant-velocity: stop() === e-stop
         httpSendText(c, 200, "OK", "estop\n"); return;
     }
 
@@ -871,7 +895,7 @@ static void httpDispatch(EthernetClient &c, const char *path, const char *query)
         Axis *a = getParam(query, "axis", axisName, sizeof(axisName)) ? findAxis(axisName) : nullptr;
         if (!a) { httpSendText(c, 400, "Bad Request", "bad axis\n"); return; }
         cancelHoming(*a);
-        a->stepper.setCurrentPosition(0);
+        a->stepper.setPosition(0);
         savePositionIfChanged(*a);
         httpSendText(c, 200, "OK", "zeroed\n"); return;
     }
@@ -882,7 +906,7 @@ static void httpDispatch(EthernetClient &c, const char *path, const char *query)
         float v = strtof(valStr, nullptr);
         if (!a || v <= 0) { httpSendText(c, 400, "Bad Request", "bad args\n"); return; }
         a->currentSpeed = v;
-        a->stepper.setMaxSpeed(v);
+        a->stepper.setSpeed((uint32_t)v);
         httpSendText(c, 200, "OK", "speed\n"); return;
     }
 
@@ -892,7 +916,8 @@ static void httpDispatch(EthernetClient &c, const char *path, const char *query)
         float v = strtof(valStr, nullptr);
         if (!a || v <= 0) { httpSendText(c, 400, "Bad Request", "bad args\n"); return; }
         a->currentAccel = v;
-        a->stepper.setAcceleration(v);
+        // accel is a no-op on FlexPwmStepper (constant velocity); we
+        // still store currentAccel for display in /api/status + UI.
         httpSendText(c, 200, "OK", "accel\n"); return;
     }
 
@@ -1005,12 +1030,14 @@ void setup() {
         pinMode(a.pin_limit, INPUT_PULLUP);
         a.limitLastState = digitalRead(a.pin_limit);
 
-        a.stepper.setMinPulseWidth(board::STEP_MIN_PULSE_US);
-        a.stepper.setMaxSpeed(a.currentSpeed);
-        a.stepper.setAcceleration(a.currentAccel);
+        // FlexPWM submodule init + ISR vector wiring. Pulse width is
+        // fixed at 50% duty by FlexPWM (no setMinPulseWidth needed);
+        // acceleration is not supported (constant velocity).
+        a.stepper.init();
+        a.stepper.setSpeed((uint32_t)a.currentSpeed);
 
         long savedPos = nvsLoadPosition(a.ee_pos_addr);
-        a.stepper.setCurrentPosition(savedPos);
+        a.stepper.setPosition(savedPos);
         a.lastSavedPos = savedPos;
     }
     enableAll(true);
@@ -1095,11 +1122,10 @@ void loop() {
         if (!motorEnabled) { Serial.println(F("Motors disabled — enable first (E).")); break; }
         ensureDriverReady(a);
         Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] jog CW +100 steps"));
-        a.stepper.move(100);
-        a.stepper.runToPosition();
-        savePositionIfChanged(a);
+        a.stepper.setSpeed((uint32_t)a.currentSpeed);
+        a.stepper.moveSteps(100);   // non-blocking; ISR counts down to target
         a.lastMotionMs = millis();
-        a.wasRunning = false;
+        a.wasRunning = true;
         break;
     case '6':
         cancelHoming(a);
@@ -1107,50 +1133,57 @@ void loop() {
         if (!motorEnabled) { Serial.println(F("Motors disabled — enable first (E).")); break; }
         ensureDriverReady(a);
         Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] jog CCW -100 steps"));
-        a.stepper.move(-100);
-        a.stepper.runToPosition();
-        savePositionIfChanged(a);
+        a.stepper.setSpeed((uint32_t)a.currentSpeed);
+        a.stepper.moveSteps(-100);
         a.lastMotionMs = millis();
-        a.wasRunning = false;
+        a.wasRunning = true;
         break;
     case '7':
         if (a.continuousMode && a.continuousDir > 0) {
             a.continuousMode = false;
+            a.stepper.stop();
             Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] continuous CW stopped."));
         } else {
             cancelHoming(a);
             ensureDriverReady(a);
-            a.continuousMode = true;
-            a.continuousDir = +1;
-            a.lastReportedRev = a.stepper.currentPosition() / STEPS_PER_REV;
+            a.continuousMode  = true;
+            a.continuousDir   = +1;
+            a.lastReportedRev = a.stepper.position() / STEPS_PER_REV;
             a.lastContSaveMs  = millis();
+            a.stepper.setSpeed((uint32_t)a.currentSpeed);
+            a.stepper.runContinuous(+1);
             Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] continuous CW started."));
         }
         break;
     case '8':
         if (a.continuousMode && a.continuousDir < 0) {
             a.continuousMode = false;
+            a.stepper.stop();
             Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] continuous CCW stopped."));
         } else {
             cancelHoming(a);
             ensureDriverReady(a);
-            a.continuousMode = true;
-            a.continuousDir = -1;
-            a.lastReportedRev = a.stepper.currentPosition() / STEPS_PER_REV;
+            a.continuousMode  = true;
+            a.continuousDir   = -1;
+            a.lastReportedRev = a.stepper.position() / STEPS_PER_REV;
             a.lastContSaveMs  = millis();
+            a.stepper.setSpeed((uint32_t)a.currentSpeed);
+            a.stepper.runContinuous(-1);
             Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] continuous CCW started."));
         }
         break;
     case '9':
+        // FlexPWM constant-velocity: stop() === e-stop. No decel ramp
+        // to do (kept verb name for menu familiarity).
         cancelHoming(a);
         a.continuousMode = false;
         a.stepper.stop();
-        Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] STOP — decelerating."));
+        Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] STOP."));
         break;
     case '0':
         cancelHoming(a);
         a.continuousMode = false;
-        a.stepper.setCurrentPosition(a.stepper.currentPosition());   // zero velocity
+        a.stepper.stop();
         Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] EMERGENCY STOP."));
         break;
 
@@ -1158,7 +1191,7 @@ void loop() {
         float spd = readFloatFromSerial();
         if (spd > 0) {
             a.currentSpeed = spd;
-            a.stepper.setMaxSpeed(a.currentSpeed);
+            a.stepper.setSpeed((uint32_t)a.currentSpeed);
             Serial.print(F("[")); Serial.print(a.name);
             Serial.print(F("] speed = ")); Serial.print(a.currentSpeed, 0); Serial.println(F(" steps/s"));
         }
@@ -1168,7 +1201,8 @@ void loop() {
         float acc = readFloatFromSerial();
         if (acc > 0) {
             a.currentAccel = acc;
-            a.stepper.setAcceleration(a.currentAccel);
+            // accel is a no-op under FlexPwmStepper (constant velocity);
+            // value is stored for display only.
             Serial.print(F("[")); Serial.print(a.name);
             Serial.print(F("] accel = ")); Serial.print(a.currentAccel, 0); Serial.println(F(" steps/s²"));
         }
@@ -1195,7 +1229,7 @@ void loop() {
         break;
     case 'Z': case 'z':
         cancelHoming(a);
-        a.stepper.setCurrentPosition(0);
+        a.stepper.setPosition(0);
         savePositionIfChanged(a);
         Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] position zeroed (declared home)."));
         break;
