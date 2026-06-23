@@ -31,10 +31,13 @@ lands during M1b.2 hardware integration. The current short form
 | Subsystem              | Choice (default)                                                              |
 |------------------------|-------------------------------------------------------------------------------|
 | Tuner-side MCU         | Teensy 4.1 (Phase 1); STM32H743 (Phase 2 fallback)                            |
-| L actuator             | NEMA 17 + planetary gearbox → roller inductor                                 |
-| C actuator             | NEMA 17 → vacuum-variable capacitor shaft                                     |
-| Stepper drivers        | TMC2209 ×2, UART config, StealthChop + StallGuard                              |
-| Position encoder       | Incremental quadrature optical, ≥ 2000 CPR ×2 (absolute SSI optional per axis) |
+| Tuner-side carrier     | grblHAL Teensy 4.x V2.09 (Phil Barrett, CNC controller board)                  |
+| L actuator             | **NEMA 23 stepper, dual-shaft** + planetary gearbox → roller inductor          |
+| C actuator             | **NEMA 23 stepper, dual-shaft** + planetary gearbox → vacuum-variable cap shaft|
+| Stepper drivers        | **TB6600** ×2 (opto-isolated, active-LOW ENA, ≥ 5 µs STEP pulse width)         |
+| Step pulse source      | **FlexPWM hardware** on the MCU (no loop-polled software stepping; see CLAUDE.md "Firmware portability rule" + `firmware/t41-stepper-test/src/flexpwm_stepper.h`) |
+| Homing                 | Per-axis mechanical limit switch on V2.09 carrier opto inputs (no StallGuard — TB6600 doesn't expose stall feedback) |
+| Position encoder       | **Optional**, per axis. Incremental quadrature optical, ≥ 2000 CPR, mounted on the NEMA 23's rear extended shaft (motor's front shaft drives the gearbox / coupling; rear shaft is free for encoder mounting). Absolute SSI is a per-axis drop-in alternative |
 | Vacuum relays          | Gigavac G2 / G81 ×3 (Hi-Z / Lo-Z / bypass)                                    |
 | Balun                  | 1:1 or 4:1 current, Fair-Rite 43 / 31 ferrite (decided at M5)                  |
 | RF detector            | AD8302 (gain / phase) + AD8307 ×2 (Fwd / Rev)                                 |
