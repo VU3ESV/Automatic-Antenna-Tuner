@@ -21,8 +21,11 @@ re-matching the feedline to the 50 Ω transceiver. The status quo is:
 
 ## Goal
 
-Replace the manual tuner with an **automatic L-network tuner** for the
-same Doublet, sharing the station's existing automation pattern
+Replace the manual tuner with an **automatic antenna tuner** for the
+same Doublet — built around an **L-Match by default**, with **T-Match
+and Pi-Match topologies also first-class supported** (selected once at
+install time, declared to the firmware via configuration). The design
+shares the station's existing automation pattern
 ([LP-100A-Server](https://github.com/VU3ESV/LP-100A-Server)): one Go
 process on a Raspberry Pi owns the hardware, fans out telemetry over
 WebSocket, and accepts named control verbs from a browser / touchscreen
@@ -48,14 +51,23 @@ UI.
   Teensy 4.1 (Phase 1) or STM32H743 (Phase 2 fallback).
 - One uniform shape across all station services so debug muscle memory
   transfers between LP-100A-Server and this project.
+- **Off-the-shelf carrier for Phase 1**: Phil Barrett's grblHAL-teensy
+  4.x V2.09 board provides the Teensy-4.1 socket, 5 stepper-driver
+  channels, opto-isolated digital inputs, relay drivers, and the PJRC
+  Ethernet kit footprint. Avoids a custom-carrier PCB spin until the
+  Phase-2 RF-commissioning decision. See
+  [docs/HW-T41-CARRIER.md](docs/HW-T41-CARRIER.md).
 
 ## Non-goals (Phase 1)
 
 Phase 1 (M0 – M6, the committed delivery) intentionally does **not**
 target:
 
-- T-network or pi-network tuning. L-network only — see
-  [CLAUDE.md](CLAUDE.md) "RF topology" for why.
+- T-Match / Pi-Match **auto-tune**. Phase 1 ships the L-Match search
+  algorithm fully wired; T and Pi topologies are supported through the
+  HAL and protocol layer for "drive each element to a commanded
+  position", but the search/auto-tune work is deferred. T/Pi installs
+  in Phase 1 are operator-driven via the encoders and *Save* button.
 - Balanced-line tuning without a balun. The 1:1 current balun on the
   output is part of the architecture, not an option.
 - Cloud relay or NAT traversal. LAN-only, like LP-100A-Server.
@@ -84,10 +96,23 @@ Phase 2 SO2R behaviour.
 
 ## Design rationale
 
-- **L-network over T-network** because L is theoretically efficient
-  (only two reactive elements, both lossless in the limit) and matches
-  the user's Doublet impedance ranges across all amateur bands when
-  the C is switchable to either side via vacuum relays.
+- **L-Match as default, T/Pi as opt-in** — L wins on efficiency
+  (two reactive elements vs. three; lower insertion loss on near-50 Ω
+  loads) and matches the operator's Doublet impedance ranges across
+  all amateur bands when the C is switchable to either side via vacuum
+  relays. T-Match and Pi-Match are supported in the firmware /
+  protocol / HAL because the chosen carrier already has the stepper
+  and relay channels to drive them, and a future build (or a different
+  operator's antenna) may favour the wider impedance range of T or the
+  band-edge behaviour of Pi. Selection is install-time, persisted on
+  the controller.
+- **Off-the-shelf Teensy-4.1 carrier (grblHAL-teensy-4.x V2.09)** for
+  Phase 1 hardware. Spares a custom-PCB spin and brings the 5 stepper
+  channels, 10 opto-isolated inputs, and 7 relay drivers we need
+  (with headroom) on one board. The firmware-portability rule keeps
+  the application layer carrier-agnostic, so the Phase-2 custom
+  carrier (if commissioned) is a HAL swap. See
+  [docs/HW-T41-CARRIER.md](docs/HW-T41-CARRIER.md).
 - **Two-controller split** because the safety-critical real-time path
   (motor + RF lockout + measurement at ~10 kSPS) belongs on a fast MCU
   next to the hardware, and the human-facing path (touchscreen GUI, CAT

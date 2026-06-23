@@ -1,16 +1,20 @@
 # Automatic Antenna Tuner
 
-A two-controller automatic L-network antenna tuner for a **Doublet fed with
-460 Ω / 600 Ω open-wire ladder line, 160 m – 6 m**. A **tuner controller**
-sits at the tuner enclosure (drives stepper-motor-actuated **roller inductor**
-and **vacuum-variable capacitor**, switches **vacuum relays** for L-network
-side selection, samples the RF detector chain). A **master controller** lives
+A two-controller automatic antenna tuner for a **Doublet fed with 460 Ω /
+600 Ω open-wire ladder line, 160 m – 6 m**. Supports **L-Match (default),
+T-Match, and Pi-Match** network topologies; the chosen topology is declared
+to the firmware at install time and persisted on the controller. A **tuner
+controller** sits at the tuner enclosure (drives 2 or 3 stepper-actuated
+reactive elements — roller inductors, vacuum-variable capacitors, depending
+on topology; switches **vacuum relays** for topology-specific path
+selection; samples the RF detector chain). A **master controller** lives
 in the shack: a Raspberry Pi with a touchscreen GUI, two Adafruit ANO
 directional encoders, a CAT link to the transceiver, and a SQLite memory of
-optimal (L, C, side) per band/frequency. The two controllers talk over
-**Ethernet using a WebSocket JSON protocol**, following the
-[LP-100A-Server](https://github.com/VU3ESV/LP-100A-Server) pattern (one
-process owns the hardware, fans out telemetry, accepts named control verbs).
+optimal element-positions per (topology, band, frequency). The two
+controllers talk over **Ethernet using a WebSocket JSON protocol**,
+following the [LP-100A-Server](https://github.com/VU3ESV/LP-100A-Server)
+pattern (one process owns the hardware, fans out telemetry, accepts named
+control verbs).
 
 This `CLAUDE.md` is the **contract reference** — the hardware truths, the
 network protocol, and the invariants a future change must not break. Design
@@ -30,20 +34,32 @@ Automatic-Antenna-Tuner/
 │   ├── PLAN.md          # milestone-based implementation plan
 │   ├── HARDWARE.md      # BoM, schematic notes, wiring
 │   ├── PROTOCOL.md      # full WebSocket JSON protocol spec
-│   └── RF-DESIGN.md     # L-network theory, component sizing, detector chain
+│   ├── RF-DESIGN.md     # network-topology theory, component sizing, detector chain
+│   └── HW-T41-CARRIER.md # plan: grblHAL-teensy 4.x V2.09 board as the carrier
 ├── firmware/
 │   └── tuner-controller/  # MCU firmware (C/C++ on Teensy 4.1 or STM32H7)
 └── master/
     └── tuner-master/      # Go server + embedded web UI, runs on the Pi
 ```
 
-## RF topology (locked in)
+## RF topology (configurable)
 
-**Reconfigurable L-network**, single L + single C, with a vacuum-relay-driven
-selector that places the capacitor on either the **source side** (for
-Zload < 50 Ω) or the **load side** (for Zload > 50 Ω). A 1:1 or 4:1
-**current balun** on the output couples the unbalanced L-network to the
-balanced ladder line; the balun is fixed (not switched).
+This codebase supports three network topologies. The L-Match is the
+**default and most-developed** path; T-Match and Pi-Match are first-
+class supported but built second. The chosen topology is declared
+to the firmware once at install time via the `set_topology`
+configuration verb and committed to NVRAM; changing topology is
+treated as a hardware change and requires a power cycle.
+
+A 1:1 or 4:1 **current balun** on the output couples the unbalanced
+network to the balanced ladder line; the balun is fixed (not switched)
+and is independent of topology choice.
+
+### L-Match (2 reactive elements, default)
+
+Reconfigurable single L + single C, with a vacuum-relay-driven selector
+that places the capacitor on either the **source side** (for Zload < 50 Ω)
+or the **load side** (for Zload > 50 Ω).
 
 ```
                           ┌──── relay K1 (HI-Z position) ────┐
@@ -57,13 +73,56 @@ TX ── SWR/Z ── series L ──┼─────────────
   the load side** (after L).
 - **LO-Z mode (Zload < 50 Ω):** K1 open, K2 closed. C is in shunt **across
   the source side** (before L).
-- **BYPASS:** a third relay (K3, not shown) hard-shorts the network so the
+- **BYPASS:** a third relay (K3) hard-shorts the network so the
   transceiver feeds the balun directly. Used during startup and any time
-  position is being changed.
+  positions are being changed.
 
-This is the only topology this codebase supports. Do not introduce T-network
-or pi-network logic; if a future change wants a different topology, it is a
-new project, not a fork of this one.
+### T-Match (3 reactive elements)
+
+Two series capacitors with a shunt inductor between them. Wide
+impedance range; higher loss than L on near-50 Ω loads.
+
+```
+TX ── SWR/Z ── C₁ ──┬── C₂ ────── BALUN ── ladder line
+                    │
+                    L (shunt to GND)
+```
+
+All three elements are stepper-driven (typically two vacuum-variable
+capacitors and one roller inductor). No source/load-side selector
+relay is required — the T topology is symmetric — but the **BYPASS
+relay (K3)** is retained per invariant 2.
+
+### Pi-Match (3 reactive elements)
+
+Series inductor with two shunt capacitors. Common in higher-power
+applications; behaves well at the band edges.
+
+```
+TX ── SWR/Z ──┬── L ──┬────── BALUN ── ladder line
+              │       │
+              C₁      C₂
+              │       │
+             GND     GND
+```
+
+Same actuator and relay set as T-Match; only the wiring differs.
+
+### Topology vs firmware
+
+The HAL exposes axes 0/1/2 as opaque handles; the application layer
+reads a topology block (served by the master, persisted on the
+controller) that names each element, gives its type (L / C), connects
+it to a HAL axis, and stores its calibration and limits. The control
+loop, tuning algorithm, and memory schema are topology-aware; pin
+maps and motor counts live in `firmware/tuner-controller/hal/board/`
+and are decoupled from the topology choice — see
+[docs/HW-T41-CARRIER.md](docs/HW-T41-CARRIER.md) for the planned
+mapping on the grblHAL Teensy 4.x V2.09 carrier.
+
+T/Pi-Match support is in scope but **L-Match is the only topology
+exercised end-to-end through M6**; T/Pi auto-tune development is a
+Phase-2 deliverable (see [docs/PLAN.md](docs/PLAN.md)).
 
 ## Invariants (do not violate)
 
@@ -113,8 +172,8 @@ discriminator, monotonic `seq` on server→client frames, named verbs only
 | `type`       | Purpose                                                                            |
 |--------------|------------------------------------------------------------------------------------|
 | `telemetry`  | Live measurements: `fwd_w`, `rev_w`, `swr`, `z_mag`, `z_phase`, `r`, `x`, `mode`.  |
-| `state`      | Mechanical/relay state: `l_steps`, `c_steps`, `l_enc`, `c_enc`, `side`, `bypass`, `last_move`. |
-| `memory`     | Result of memory lookup/save: `band`, `freq_hz`, `slot`, `l`, `c`, `side`, `swr_at_save`. |
+| `state`      | Mechanical/relay state: `topology`, `axes[]` (each with `name`, `steps`, `enc`), `side` (L-Match only), `bypass`, `homed`, `last_move`. |
+| `memory`     | Result of memory lookup/save: `topology`, `band`, `freq_hz`, `slot`, `positions[]`, `side` (L-Match only), `swr_at_save`. |
 | `status`     | Free-form `{level, msg}` for warnings, errors, lockouts, reconnects.               |
 | `heartbeat`  | Sent every `heartbeat_ms` when no other frame would be sent.                       |
 | `ack`        | Reply to a client command (`ref`, `ok`, optional `err`).                           |
@@ -123,14 +182,16 @@ discriminator, monotonic `seq` on server→client frames, named verbs only
 
 | `action`         | Args                              | Effect                                                |
 |------------------|-----------------------------------|-------------------------------------------------------|
-| `move_l`         | `delta_steps` *or* `target_steps` | Drive L stepper. Refused if RF present.               |
-| `move_c`         | `delta_steps` *or* `target_steps` | Drive C stepper. Refused if RF present.               |
-| `set_side`       | `"hi_z" \| "lo_z"`                | Switch K1/K2. Refused if RF present.                  |
+| `set_topology`   | `{kind, elements[]}`              | Declare wired topology (L / T / Pi) and element map. Persisted to NVRAM; required before any motion verb on first install. |
+| `move_axis`      | `axis`, `delta_steps` *or* `target_steps` | Drive a named axis. Refused if RF present.    |
+| `move_l`         | `delta_steps` *or* `target_steps` | Alias for axis "L" (L-Match only). Refused if RF present. |
+| `move_c`         | `delta_steps` *or* `target_steps` | Alias for axis "C" (L-Match only). Refused if RF present. |
+| `set_side`       | `"hi_z" \| "lo_z"`                | Switch K1/K2 (L-Match only). Refused if RF present.    |
 | `set_bypass`     | `true \| false`                   | K3. The only relay verb safe to issue with RF on.     |
-| `recall`         | `freq_hz`                         | Look up slot, move to (L, C, side), then engage.      |
-| `save`           | `freq_hz`, optional `label`       | Persist current (L, C, side) for `(band, bucket)`.    |
+| `recall`         | `freq_hz`                         | Look up slot, move to stored element-positions, then engage. Tuple shape is per declared topology — see PROTOCOL.md. |
+| `save`           | `freq_hz`, optional `label`       | Persist current element-positions for `(topology, band, bucket)`. |
 | `auto_tune`      | `freq_hz`, `power_w`              | Run the search algorithm at low power; updates slot.  |
-| `home`           | —                                 | Drive both axes to mechanical home; recalibrate enc.  |
+| `home`           | —                                 | Drive every active axis to mechanical home; recalibrate encs. |
 | `resync`         | —                                 | Re-emit current `state` + `telemetry`.                |
 
 Frame examples and error semantics: [docs/PROTOCOL.md](docs/PROTOCOL.md).
@@ -140,15 +201,16 @@ Frame examples and error semantics: [docs/PROTOCOL.md](docs/PROTOCOL.md).
 | Subsystem              | Choice (default)                             | Notes                                                                  |
 |------------------------|----------------------------------------------|------------------------------------------------------------------------|
 | Tuner-side MCU         | **Teensy 4.1** (NXP i.MX RT1062, 600 MHz) — **Phase 1** | Hardware QEI, 16-bit ADC, native Ethernet PHY (PJRC kit), microSD on-board. PSRAM + 2nd QSPI flash footprints for expansion. **Phase 2 migration target: STM32H743 on a custom board** if RF immunity testing at M5 surfaces problems (see "MCU selection" below). |
-| L actuator             | NEMA 17 stepper + planetary gearbox → roller inductor | Driver: **TMC2209** in StealthChop; sensorless homing via StallGuard. |
-| C actuator             | NEMA 17 stepper → vacuum-variable cap shaft  | Same driver family. Cap example: Jennings UCSL-1500 (10–1500 pF, 5 kV).|
+| Tuner-side carrier     | **grblHAL-teensy-4.x V2.09** (Phil Barrett, T41E5XBB SKU for Ethernet) — **Phase 1** | Off-the-shelf Teensy 4.1 carrier with 5 stepper-driver channels, 10 opto-isolated inputs, 7 relay drivers, and the PJRC Ethernet Kit footprint. Avoids a custom carrier PCB for Phase 1; revisited at the M5 Phase-2 decision. Full mapping in [docs/HW-T41-CARRIER.md](docs/HW-T41-CARRIER.md). |
+| Reactive-element axes  | 2 (L-Match) or 3 (T-Match / Pi-Match)        | Each axis: stepper + driver + encoder + end-stop. Axis count is a function of declared topology, not a build-time choice. |
+| Element actuators      | NEMA 17 (or NEMA 23 for high-Q roller inductors) stepper + planetary gearbox → roller inductor / vacuum-variable capacitor shaft | Driver: **TMC2209** in StealthChop; sensorless homing via StallGuard. Cap example: Jennings UCSL-1500 (10–1500 pF, 5 kV). |
 | Position encoder       | **Incremental quadrature optical**, 2000+ CPR (default per axis) | Direct-coupled to shaft (post-gearbox). Drives the MCU's hardware QEI. Z-phase / index pulse used opportunistically. Anchored by homing (StallGuard) and a clean-shutdown NVRAM record — see docs/ARCHITECTURE.md §5.2. Absolute SSI is a per-axis drop-in alternative via the same HAL (useful if the L axis's homing time becomes intolerable). |
 | Vacuum relays          | Gigavac G2/G81 or Kilovac H-series, SPDT      | 26 V coil, HV bias supply. Hot-switch protection in firmware (TX lock).|
 | Balun                  | 1:1 or 4:1 current balun, ferrite (Fair-Rite 43 / 31) | Fixed, on the output. Spec: ≥3 kW dissipation safety margin.      |
 | RF detector            | **AD8302** (gain/phase) + dual log detector (AD8307 ×2 on Fwd/Rev tap) | AD8302 for complex Z; AD8307 pair for SWR/return loss. |
 | Directional coupler    | Stockton or Tandem-match, 50 Ω, ~50 dB coupling | Sized for full legal-limit power.                                   |
 | Master MCU             | **Raspberry Pi 4 / 5**                        | 7" or 10" capacitive touchscreen. 64-bit Raspberry Pi OS.              |
-| Master input           | 2 × Adafruit ANO directional encoder (5735)   | Connect via GPIO; A/B + 5 directional + push. One axis = L, other = C. |
+| Master input           | 2 × Adafruit ANO directional encoder (5735); a 3rd added for T/Pi-Match installs | Connect via GPIO; A/B + 5 directional + push. One encoder per active reactive-element axis. |
 | Transceiver link       | USB serial (CAT)                              | CI-V, Yaesu CAT, Kenwood, K3/K4 — abstracted behind one driver iface.  |
 
 ## MCU selection (Phase 1 / Phase 2)
@@ -238,7 +300,10 @@ Following the LP-100A-Server precedent so the station's services stay uniform:
 
 **Phase 1 scope (M0 – M6, the committed delivery):**
 
-- T-network or pi-network tuning. L-network only — see "RF topology" above.
+- T-Match / Pi-Match auto-tune (search algorithm). The topologies are
+  supported through M6 to the level of "drive each declared element to a
+  commanded position", but the auto-tune search algorithm is L-Match-only
+  in Phase 1; T/Pi auto-tune is a Phase-2 deliverable.
 - Balanced-line tuning without a balun. The balun is part of the architecture.
 - Hot-switching the L or C under RF. The TX lockout is enforced in firmware
   *and* the master GUI; both must agree before motion is permitted.

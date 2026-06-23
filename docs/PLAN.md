@@ -148,8 +148,19 @@ End-to-end: Teensy → master → browser shows real controller state.
       Hi-Z / Lo-Z toggle (auto-highlighted from `state.side`), bypass
       engage/release, re-home button, fake-Fwd-W injector, last-ack
       readout. Two-client smoke deferred to bench validation.
-- [ ] Wire two TMC2209 drivers to the Teensy (UART config). Pick microstep
-      resolution (default 1/16) and current limit per motor spec.
+- [ ] **Carrier-board bring-up** — assemble / verify Phil Barrett's
+      grblHAL-teensy-4.x V2.09 board (T41E5XBB SKU for Ethernet) and
+      author `firmware/tuner-controller/hal/board/t41_v209.{h,cpp}`
+      with the pin map, relay-polarity, and opto-input-polarity for
+      this carrier. Bare-Teensy dev wiring keeps working via a
+      `hal/board/bench.h` env. Plan + reference URLs:
+      [`HW-T41-CARRIER.md`](HW-T41-CARRIER.md).
+- [ ] Wire two TMC2209 drivers via the carrier's axis-0/axis-1 STEP/DIR/EN
+      screw terminals. Pick microstep resolution (default 1/16) and
+      current limit per motor spec. Drivers and end-stops (opto-isolated
+      inputs on the carrier) wire to limit-X / limit-Y per the V2.09
+      schematic. Vacuum relays K1/K2/K3 driven from the carrier's
+      relay-driver outputs 1–3 (12 V coil jumper).
 - [ ] Implement `motor` task with trapezoidal accel/decel; verify motion
       profile on scope.
 - [ ] Wire quadrature encoders into the Teensy's hardware QEI peripherals.
@@ -167,6 +178,15 @@ End-to-end: Teensy → master → browser shows real controller state.
       payload format is unchanged.
 - [x] Verb set for M1: `move_l`, `move_c`, `home`, `set_side`,
       `set_bypass`, `resync`. All wired end-to-end against the sim HAL.
+- [ ] **Topology declaration**: add `set_topology` verb (kind: `L`,
+      `T`, `Pi`; element map per [`../CLAUDE.md`](../CLAUDE.md) RF
+      topology + [`HW-T41-CARRIER.md`](HW-T41-CARRIER.md) §"Topology
+      selection"). Persist the chosen topology to NVRAM; refuse every
+      motion verb until topology is declared. M1 only exercises the
+      L-Match path end-to-end; the T/Pi cases land as inert switch
+      arms (motion HAL works for any declared axis count, but
+      L-Match-specific `set_side` is rejected with `wrong_topology` on
+      T/Pi installs).
 - [ ] Wire vacuum relays through optoisolated MOSFET drivers + HV bias;
       implement K1/K2 mutual-exclusion + K3 override in firmware.
 - [x] `safety` task: refuses `move_l`/`move_c`/`set_side`/`home` when
@@ -334,8 +354,14 @@ the tuner's own chain and the LP-100A as a cross-check.
       stability. Document max continuous power per band.
 - [ ] 48 h on-air soak: leave the master + tuner running, exercise from
       multiple bands and stations, verify no drift, no spurious lockouts.
-- [ ] **MCU Phase 1 / Phase 2 go/no-go.** During the power ramp and the
-      48 h soak, log every event that looks like RF immunity trouble:
+- [ ] **MCU + carrier-board Phase 1 / Phase 2 go/no-go.** During the
+      power ramp and the 48 h soak, evaluate **both** the Teensy 4.1
+      MCU choice and the grblHAL-teensy-4.x V2.09 off-the-shelf
+      carrier. The two decisions are coupled: a "stay on Teensy 4.1"
+      result can still require a custom carrier if the V2.09 PCB's
+      ground plane, opto isolation, or relay-driver trace routing
+      can't be tamed by enclosure-level fixes. Log every event that
+      looks like RF immunity trouble:
       ADC noise spikes during TX, MCU resets, Ethernet link drops on
       key-up, encoder count glitches, spurious safety lockouts. Score
       each by reproducibility and by whether enclosure-level fixes
@@ -475,6 +501,18 @@ the architecture, only the BoM:
 1. **Tuner-side MCU.** Phase 1 is **Teensy 4.1**; Phase 2 fallback is
    **STM32H743** on a custom board. See [`../CLAUDE.md`](../CLAUDE.md)
    "MCU selection" for the portability rules. Decision point is M5.
+1a. **Tuner-side carrier board** — **decided: grblHAL-teensy-4.x V2.09**
+   (Phil Barrett, T41E5XBB SKU for Ethernet). Off-the-shelf board with
+   5 stepper channels, 10 opto-isolated digital inputs, 7 relay
+   drivers, and the PJRC Ethernet Kit footprint. Avoids a custom-PCB
+   spin for Phase 1; revisited as part of the Phase-1/Phase-2 go/no-go
+   in M5. Plan + reference URLs: [`HW-T41-CARRIER.md`](HW-T41-CARRIER.md).
+1b. **Tuner topology** — L-Match is the Phase 1 default and the only
+   topology with auto-tune in scope through M6. T-Match and Pi-Match
+   are first-class supported through the HAL / protocol / "drive each
+   element to a commanded position" path; auto-tune for T/Pi is a
+   Phase-2 deliverable. See [`../CLAUDE.md`](../CLAUDE.md) §"RF
+   topology" for the topology selection mechanism.
 2. **Ethernet library.** **QNEthernet** (lwIP) is the default; the
    build also supports **NativeEthernet** (FNET) via a separate PIO env
    for A/B testing and to match the Morconi / TeensyMaestro convention.
