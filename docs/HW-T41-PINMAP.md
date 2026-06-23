@@ -20,17 +20,51 @@ design, not upstream.
 Each axis drives an external stepper driver (TMC2209 / DM542 /
 equivalent) via STEP / DIR / EN screw terminals on the carrier.
 
-| Axis | STEP | DIR  | EN   | Tuner use (L-Match)        | Tuner use (T-Match) | Tuner use (Pi-Match) |
-| ---- | ---- | ---- | ---- | -------------------------- | ------------------- | -------------------- |
-| X    | 2    | 3    | 10   | Roller inductor (L)        | Series C₁           | Shunt C₁             |
-| Y    | 4    | 5    | 40   | Vacuum-variable cap (C)    | Series C₂           | Series L             |
-| Z    | 6    | 7    | 39   | *(unused)*                 | Shunt L             | Shunt C₂             |
-| M3   | 8    | 9    | 38   | *(spare — bandswitch, etc.)* | spare             | spare                |
-| M4   | 26   | 27   | 37   | *(spare)*                  | spare               | spare                |
+| Axis | STEP | DIR  | EN   | STEP-pin PWM source       | Tuner use (L-Match)        | Tuner use (T-Match) | Tuner use (Pi-Match) |
+| ---- | ---- | ---- | ---- | ------------------------- | -------------------------- | ------------------- | -------------------- |
+| X    | 2    | 3    | 10   | **FlexPWM4.2 A**          | Roller inductor (L)        | Series C₁           | Shunt C₁             |
+| Y    | 4    | 5    | 40   | **FlexPWM2.0 A**          | Vacuum-variable cap (C)    | Series C₂           | Series L             |
+| Z    | 6    | 7    | 39   | **FlexPWM2.2 A**          | *(unused)*                 | Shunt L             | Shunt C₂             |
+| M3   | 8    | 9    | 38   | **FlexPWM1.3 A**          | *(spare — bandswitch, etc.)* | spare             | spare                |
+| M4   | 26   | 27   | 37   | **none** (PIT-ISR only)   | *(spare)*                  | spare               | spare                |
 
 **ENA polarity:** active-LOW on most external drivers (LOW = driver
 enabled, coils energised). Confirm with the `T` command in
 `firmware/t41-stepper-test/` before flipping a high-current axis.
+
+**STEP-pin PWM column:** verified against `framework-arduinoteensy/
+cores/teensy4/pwm.c`. Pins 2 / 4 / 6 / 8 each map to a distinct
+FlexPWM submodule (4.2 / 2.0 / 2.2 / 1.3) — submodule-independent,
+so all four can run concurrent autonomous step trains. Pin 26 has
+**no FlexPWM or QuadTimer mux** on it; software `analogWrite()`
+emulation only, which is useless for stepper pulse trains.
+
+This matters when picking the hardware-pulse-generation strategy
+required by [CLAUDE.md](../CLAUDE.md) "Firmware portability rule"
+(no `runSpeed()` polling in `loop()`). Two viable architectures:
+
+1. **FlexPWM-direct** — peripheral toggles the STEP pin
+   autonomously; acceleration ramps written into submodule
+   registers; **zero CPU per pulse**. Limited to FlexPWM-capable
+   pins. Natural fit for our 3-axis tuner (X / Y / Z all qualify
+   on distinct submodules — no contention). DIR pins (3 / 5 / 7
+   / 9) don't need PWM; pin 3 happens to share submodule 4.2 with
+   X STEP, which is fine because DIR is a static GPIO write.
+2. **PIT + ISR + fast GPIO** — `PIT_LDVAL` schedules the next
+   pulse time; the ISR sets the STEP pin via
+   `IMXRT_GPIO*.DR_SET/DR_CLEAR`. **Light CPU per pulse but at
+   interrupt priority** — immune to `loop()` blocking. Works on
+   any GPIO including pin 26. This is what upstream grblHAL uses
+   (see `iMXRT1062/grblHAL_Teensy4/src/driver.c`).
+
+Both honour the portability rule. The tuner application is
+**axis-independent** (each reactive element moves to its commanded
+position; we never coordinate multi-axis Bresenham motion), so
+FlexPWM-direct on X / Y / Z is the natural fit and pin 26 not
+having a hardware-PWM mux costs us nothing — M4 is spare across
+every supported topology. If a 4th-axis use ever appears, the
+PIT-ISR path is the fallback and is fully compatible with the
+same `hal/motor_teensy41.cpp` interface.
 
 ## 2 · Axis end-stop inputs (opto-isolated)
 
