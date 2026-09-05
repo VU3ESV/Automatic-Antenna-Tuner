@@ -155,7 +155,7 @@ End-to-end: Teensy → master → browser shows real controller state.
       this carrier. Bare-Teensy dev wiring keeps working via a
       `hal/board/bench.h` env. Plan + reference URLs:
       [`HW-T41-CARRIER.md`](HW-T41-CARRIER.md).
-- [ ] Wire two TMC2209 drivers via the carrier's axis-0/axis-1 STEP/DIR/EN
+- [ ] Wire two iHSS60 integrated closed-loop steppers via the carrier's axis-0/axis-1 STEP/DIR/EN
       screw terminals. Pick microstep resolution (default 1/16) and
       current limit per motor spec. Drivers and end-stops (opto-isolated
       inputs on the carrier) wire to limit-X / limit-Y per the V2.09
@@ -168,7 +168,8 @@ End-to-end: Teensy → master → browser shows real controller state.
       See [`ARCHITECTURE.md`](ARCHITECTURE.md) §5.2 for the encoder
       strategy (incremental + homing or NVRAM anchor; absolute as
       alternative).
-- [ ] Implement homing routine using StallGuard (TMC2209). Persist
+- [ ] Implement homing routine against the per-axis mechanical limit
+      switch (the iHSS60 has no StallGuard / sensorless homing). Persist
       post-homing position to NVRAM on every clean move complete so the
       next boot can skip homing when the last shutdown was clean.
 - [x] ~~Bring up Ethernet (QNEthernet on Teensy 4.1) and a minimal WS
@@ -354,6 +355,18 @@ the tuner's own chain and the LP-100A as a cross-check.
       stability. Document max continuous power per band.
 - [ ] 48 h on-air soak: leave the master + tuner running, exercise from
       multiple bands and stations, verify no drift, no spurious lockouts.
+- [ ] **Closed-loop driver feedback — final-build verification.** The
+      iHSS60 integrated closed-loop drive was adopted 2026-09-05
+      (CLAUDE.md hardware contract). Verify on the built tuner before
+      the soak:
+      ALM/PED wired to the carrier's spare opto inputs per
+      [`HW-T41-PINMAP.md`](HW-T41-PINMAP.md) §2.2 with ≈ 10 mA LED
+      current and a clean LOW at the Teensy; P10 = 1 fail-safe
+      polarity (cable-open reads as fault); P16 following-error limit
+      set for the geared load; firmware stops pulses and drops
+      `homed` on ALM, and waits for PED before persisting position.
+      Record the per-axis drive parameters (P8/P9/P10/P14/P16, DIP
+      setting) in `docs/HARDWARE.md` §4a.
 - [ ] **MCU + carrier-board Phase 1 / Phase 2 go/no-go.** During the
       power ramp and the 48 h soak, evaluate **both** the Teensy 4.1
       MCU choice and the grblHAL-teensy-4.x V2.09 off-the-shelf

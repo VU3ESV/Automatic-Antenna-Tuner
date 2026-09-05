@@ -32,12 +32,12 @@ lands during M1b.2 hardware integration. The current short form
 |------------------------|-------------------------------------------------------------------------------|
 | Tuner-side MCU         | Teensy 4.1 (Phase 1); STM32H743 (Phase 2 fallback)                            |
 | Tuner-side carrier     | grblHAL Teensy 4.x V2.09 (Phil Barrett, CNC controller board)                  |
-| L actuator             | **NEMA 23 stepper, dual-shaft** + planetary gearbox → roller inductor          |
-| C actuator             | **NEMA 23 stepper, dual-shaft** + planetary gearbox → vacuum-variable cap shaft|
-| Stepper drivers        | **TB6600** ×2 (opto-isolated, active-LOW ENA, ≥ 5 µs STEP pulse width)         |
+| L actuator             | **JMC iHSS60 integrated closed-loop stepper (NEMA 24)** + planetary gearbox → roller inductor. No rear shaft (driver sits there) |
+| C actuator             | **JMC iHSS60 integrated closed-loop stepper (NEMA 24)** + planetary gearbox → vacuum-variable cap shaft |
+| Stepper drivers        | **Integrated in the iHSS60** (adopted 2026-09-05, replacing TB6600 ×2): 24–50 VDC, 4.5 A, 200 kHz, 6400 p/r DIP, PUL/DIR/ENA 5 V/24 V opto inputs, ALM + PED opto outputs; DIR ≥ 6 µs before PUL, ≥ 2.5 µs per pulse level. Wiring + final-build checks: [`HW-T41-PINMAP.md`](HW-T41-PINMAP.md) §2.2 |
 | Step pulse source      | **FlexPWM hardware** on the MCU (no loop-polled software stepping; see CLAUDE.md "Firmware portability rule" + `firmware/t41-stepper-test/src/flexpwm_stepper.h`) |
-| Homing                 | Per-axis mechanical limit switch on V2.09 carrier opto inputs (no StallGuard — TB6600 doesn't expose stall feedback) |
-| Position encoder       | **Optional**, per axis. Incremental quadrature optical, ≥ 2000 CPR, mounted on the NEMA 23's rear extended shaft (motor's front shaft drives the gearbox / coupling; rear shaft is free for encoder mounting). Absolute SSI is a per-axis drop-in alternative |
+| Homing                 | Per-axis mechanical limit switch on V2.09 carrier opto inputs (the iHSS60 has no sensorless homing). The drive's ALM (following-error trip) and PED (arrived) outputs are the stall / arrival signals — final-build check, [`HW-T41-PINMAP.md`](HW-T41-PINMAP.md) §2.2 |
+| Position encoder       | **Inside the iHSS60** — its optical encoder closes the loop within the drive; the controller sees only ALM / PED. No rear shaft is available for an external encoder. External incremental / absolute-SSI remains a per-axis HAL option only for a non-integrated motor (Phase-2 fallback) |
 | Vacuum relays          | Gigavac G2 / G81 ×3 (Hi-Z / Lo-Z / bypass)                                    |
 | Balun                  | 1:1 or 4:1 current, Fair-Rite 43 / 31 ferrite (decided at M5)                  |
 | RF detector            | AD8302 (gain / phase) + AD8307 ×2 (Fwd / Rev)                                 |
@@ -54,14 +54,18 @@ relays are TBD in §2.
 
 ### Cap-safety stack (why the BoM looks this way)
 
-TB6600 has no stall-feedback signal (no StallGuard-equivalent), so a
-vacuum-variable capacitor cannot be protected by trusting the step
-counter. Protection is by layered envelopes — driver current
-dip-switch set to motor-rated → `homed:false` motion refusal →
-per-axis software soft limits (default 100 steps inside the
-switch) → per-axis mechanical limit switch on the V2.09 carrier
-opto inputs → optional rear-shaft encoder for post-move stall
-reconciliation. Full enforcement contract in
+The iHSS60 closes its position loop internally but reports only
+pass/fail (ALM, PED), so a vacuum-variable capacitor still cannot be
+protected by trusting the pulse counter alone. Protection is by
+layered envelopes — drive currents (P8/P9) and following-error limit
+(P16) set for the geared load via the HISU tool → ALM into a carrier
+opto input (fail-safe P10 = 1), any trip stops pulses and clears
+`homed` → `homed:false` motion refusal → per-axis software soft
+limits (default 100 steps inside the switch) → per-axis mechanical
+limit switch on the V2.09 carrier opto inputs → PED confirmation
+before a move is recorded complete. Wiring and open final-build checks
+in [`HW-T41-PINMAP.md`](HW-T41-PINMAP.md) §2.2.
+Full enforcement contract in
 [`../CLAUDE.md`](../CLAUDE.md) invariant #7; architectural rationale
 and layer-by-layer behaviour in
 [`ARCHITECTURE.md`](ARCHITECTURE.md) §5.2.5.
@@ -82,6 +86,11 @@ These are written incrementally as the build proceeds:
   [`../CLAUDE.md`](../CLAUDE.md) "MCU selection").
 - **§4 Pin assignments and connector pinouts** — *M1b.2* (must align
   with `hal/*_teensy41.cpp` once those land).
+- **§4a Closed-loop driver feedback inputs (ALM / PED)** — *final
+  build*. Carrier opto-input electrical facts and the selected wiring
+  are already in [`HW-T41-PINMAP.md`](HW-T41-PINMAP.md) §2.1–2.2; this
+  section records the measured LED current, chosen P10/P14 polarity,
+  P16 following-error limit, and per-driver timing table once decided.
 - **§5 Tandem-match coupler build notes** — *M2*. Toroid choice,
   primary / secondary turns, port-isolation measurement procedure,
   directivity sweep across 1.8 – 54 MHz on the network analyzer.

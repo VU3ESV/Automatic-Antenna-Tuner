@@ -61,7 +61,7 @@ carrier at Phase-2 RF commissioning is still a separate decision
 | -------------------- | ------------------------------------------------------------------------------------------------ |
 | MCU                  | Teensy 4.1 socket (T41 prefix in the board family name)                                          |
 | Stepper outputs      | 5 axes, screw terminals, STEP/DIR/EN per axis (external drivers — Geckodrive, DM542, TMC2208 carrier, etc.) |
-| Opto-isolated inputs | 10 (EL357N family on V2.09; EL3H7 from V2.20)                                                   |
+| Opto-isolated inputs | 10 (EL357N family on V2.09; EL3H7 from V2.20). Electrically: +5 V → 330 Ω → LED → Sig; assert by sinking ≈ 11 mA to Gnd; Teensy reads LOW. See [HW-T41-PINMAP.md](HW-T41-PINMAP.md) §2.1 |
 | Aux digital inputs   | 4, EMI-filtered, Schmitt-trigger                                                                 |
 | Relay drivers        | 7, open-collector, coil-voltage jumper 5 V/12 V                                                  |
 | Analog output        | 1 × 0–10 V (op-amp), unused in this project                                                      |
@@ -83,7 +83,7 @@ only and have migrated to KiCad.
 
 | Function                | Carrier resource                          | Notes                                                |
 | ----------------------- | ----------------------------------------- | ---------------------------------------------------- |
-| Roller-inductor stepper | Axis 0 (STEP/DIR/EN)                      | External stepper driver — TMC2209 per CLAUDE.md hardware table |
+| Roller-inductor stepper | Axis 0 (STEP/DIR/EN)                      | JMC iHSS60 integrated closed-loop stepper (STEP / DIR / EN into the drive's opto inputs) per CLAUDE.md hardware contract |
 | Vacuum-cap stepper      | Axis 1 (STEP/DIR/EN)                      | Same driver family                                   |
 | L axis end-stop         | Opto input — limit X                      | Mechanical microswitch at mechanical home            |
 | C axis end-stop         | Opto input — limit Y                      | Same                                                 |
@@ -170,7 +170,8 @@ This board changes M1b.2 onwards. M0 / M1a / M1b.1 are unaffected.
 | Step  | Goal                                                                                           |
 | ----- | ---------------------------------------------------------------------------------------------- |
 | H1    | **Buy / assemble** one T41E5XBB V2.09 board (or open-box T41U5XBB if Ethernet not yet needed). Verify against upstream BOM. |
-| H2    | **Wire up two TMC2209 stepper drivers** (or DM542 substitutes) to axes 0/1, motor + opto-input limit-switch on each axis. |
+| H2    | **Wire up two iHSS60 integrated closed-loop steppers** (STEP/DIR/EN from axes 0/1; TMC2209 / DM542 acceptable as bench substitutes) + opto-input limit-switch on each axis. |
+| H2b   | **Closed-loop driver feedback (final-build check).** iHSS60 adopted into the CLAUDE.md hardware contract 2026-09-05. Wire ALM (and PED) to the spare opto inputs per [HW-T41-PINMAP.md](HW-T41-PINMAP.md) §2.2, set P10 = 1 fail-safe polarity, verify ≈ 10 mA LED current through the drive's opto transistor, add ALM-stop / PED-confirm handling to the motor HAL. Decision + verification recorded at H9. |
 | H3    | **Wire three relay outputs** (driver 1/2/3) to a 3-relay test board representing K1/K2/K3.    |
 | H4    | **Wire the Ethernet jack** (PJRC kit, T41E5XBB variant only) and prove the existing tuner-controller's network HAL still pings the master. |
 | H5    | **Re-validate firmware-portability rule:** the existing tuner-controller firmware must compile against the new `hal/board/t41_v209.*` with no application-layer change. |
@@ -202,6 +203,7 @@ This board changes M1b.2 onwards. M0 / M1a / M1b.1 are unaffected.
 | V2.09 mechanical STEP model                            | <https://github.com/phil-barrett/grblHAL-teensy-4.x/blob/master/teensy%204.1x209%20STEP.zip>                                                         |
 | V2.09 "Unkit PCB" photo (referenced in upstream README) | <https://github.com/phil-barrett/grblHAL-teensy-4.x/blob/master/RA159231_DxO_2048.jpg>                                                              |
 | Closest user manual (V2.07)                           | <https://github.com/phil-barrett/grblHAL-teensy-4.x/blob/master/T41U5XBB%20v207.pdf>                                                                 |
+| User manual, all versions V2.07–V2.21 (BOM, errata, input/relay wiring) | <https://github.com/phil-barrett/grblHAL-teensy-4.x/blob/master/T41U5XBB%20User%20Manual.pdf>                                          |
 | grblHAL web-builder T41U5XBB pin map (JSON in zip)    | <https://github.com/phil-barrett/grblHAL-teensy-4.x/blob/master/iMXRT1062_T41U5XBB-files.zip>                                                        |
 | Maintainer's layout-redistribution policy (Issue #134) | <https://github.com/phil-barrett/grblHAL-teensy-4.x/issues/134>                                                                                      |
 | grblHAL iMXRT1062 source (for `T41U5XBB_map.h`)        | <https://github.com/grblHAL/iMXRT1062>                                                                                                                |

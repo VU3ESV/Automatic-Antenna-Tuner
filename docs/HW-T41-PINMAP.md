@@ -17,8 +17,7 @@ design, not upstream.
 
 ## 1 · Stepper outputs (5 axes)
 
-Each axis drives an external stepper driver (TMC2209 / DM542 /
-equivalent) via STEP / DIR / EN screw terminals on the carrier.
+Each axis drives a JMC iHSS60 integrated closed-loop stepper (STEP / DIR / EN into the drive's opto inputs; TMC2209 / DM542 / TB6600 also work on the bench) via STEP / DIR / EN screw terminals on the carrier.
 
 | Axis | STEP | DIR  | EN   | STEP-pin PWM source       | Tuner use (L-Match)        | Tuner use (T-Match) | Tuner use (Pi-Match) |
 | ---- | ---- | ---- | ---- | ------------------------- | -------------------------- | ------------------- | -------------------- |
@@ -73,8 +72,96 @@ same `hal/motor_teensy41.cpp` interface.
 | 20   | X LIMIT      | X-axis mechanical home microswitch         |
 | 21   | Y LIMIT      | Y-axis mechanical home microswitch         |
 | 22   | Z LIMIT      | Z-axis mechanical home microswitch (T/Pi)  |
-| 23   | A LIMIT (M3) | Spare — fault input from external interlock |
-| 28   | B LIMIT (M4) | Spare — shared with AUXINPUT5 (MPG mode)   |
+| 23   | A LIMIT (M3) | Closed-loop driver **ALM, axis L (X)** — §2.2 (verify at final build). Was: spare fault input |
+| 28   | B LIMIT (M4) | Closed-loop driver **ALM, axis C (Y)** — §2.2 (verify at final build). Shared with AUXINPUT5 (MPG mode) |
+
+### 2.1 · Opto-input electrical design (all ten inputs)
+
+From the upstream V2.07 schematic and BOM (V2.09 is electrically
+identical; see [HW-T41-CARRIER.md](HW-T41-CARRIER.md) references):
+
+- Each input is **board +5 V → 330 Ω (R2–R11) → EL357N LED → "Sig"
+  screw terminal**; the "Gnd" terminal is board ground. Schematic note:
+  *"5V operation on LED side, 3.3V operation on photo transistor side.
+  LED current set to slightly higher than 10 mA."*
+- An input is therefore **asserted by sinking ≈ 11 mA from Sig to Gnd**
+  (contact closure, NPN / open-collector, or an opto-transistor output).
+  Open circuit = inactive. The Teensy pin reads **LOW when active**
+  (`LIMIT_ACTIVE_LOW` in `hal/board/t41_v209.h`).
+- Isolation is on the Teensy side only. The LED side is the carrier's
+  own 5 V / GND, so the external device shares the carrier ground.
+- Propagation ≈ 50–100 µs through the EL357N + RC — fine for status
+  and fault signals, unusable for encoder edges (§4 note).
+
+### 2.2 · Closed-loop driver feedback inputs (ALM / PED) — selected, verify at final build
+
+Context: the **JMC iHSS60 integrated closed-loop stepper** (NEMA 24,
+6400 pulses/rev DIP setting, 200 kHz max input) was bench-tested on the
+X axis in 2026-09 and adopted into the [CLAUDE.md](../CLAUDE.md)
+hardware contract on 2026-09-05, replacing the open-loop TB6600 +
+NEMA 23. The drive exposes two opto-transistor
+outputs and nothing else that is machine-readable (its RS-232-style
+port is for JMC's HISU parameter tool; the protocol is unpublished):
+
+| Drive output | Meaning | Drive parameter |
+| ------------ | ------- | --------------- |
+| **ALM+ / ALM−** | Fault: over-current, voltage-reference error, parameter upload error, over-voltage (80 V), or following error beyond P16 × 10 counts. LED flashes 1–5× to identify which. | P10 alarm level (default 0 = conducts on fault) |
+| **PED+ / PED−** | "Arrived": encoder agrees with the commanded position within tolerance. The only positive closed-loop confirmation available. | P14 arrival level (default 1 = conducts when arrived) |
+
+**Wiring (no extra parts):** ALM+ → *Sig*, ALM− → *Gnd* of a spare opto
+input. The drive's opto transistor sinks the carrier LED's ≈ 10 mA
+directly, well inside a phototransistor output's normal 50 mA rating,
+and replaces the 3–5 kΩ pull-up the iHSS manual asks for. PED wires the
+same way. The outputs are isolated from the drive's motor supply, so
+tying ALM− to carrier ground creates no ground loop.
+
+**Polarity:**
+
+- P10 = 0 (drive default): transistor conducts on fault → Teensy LOW =
+  fault. A broken cable reads as healthy — wrong failure mode.
+- P10 = 1: conducts while healthy → LOW = OK, HIGH = fault *or* cable
+  open. **Fail-safe; preferred.** Needs the HISU tool to set.
+- Fan-in: several ALMs in **parallel** into one input = wire-OR with
+  P10 = 0; in **series** with P10 = 1 = fail-safe AND, costing ≈ 1 V per
+  transistor from the LED budget (two in series comfortable, three
+  marginal).
+
+**Pin plan:** ALM L-axis → 23 (Lim A), ALM C-axis → 28 (Lim B); PED for
+the most stall-prone axis → 15 (Probe), displacing the RF-presence
+spare. A 3-axis T/Pi build with per-axis ALM *and* PED runs out of opto
+inputs → wire-OR the ALMs. If this lands, the "motor-fault aggregate"
+role on pin 36 (§4) moves here.
+
+**Firmware behaviour (to implement with the wiring):** read ALM like a
+limit input; on fault stop pulses, mark the axis `homed:false` (a
+following-error trip means shaft and counter disagree), surface in
+`state`/UI. After a bounded move's pulse train ends, wait for PED before
+persisting position; treat a PED timeout as a stall.
+
+**Drive timing facts the HAL must honour (iHSS60 manual §5.5):** DIR
+stable ≥ 6 µs before the first PUL edge; DIR unchanged ≥ 5 µs after the
+last pulse; PUL high and low each ≥ 2.5 µs (so the 50 %-duty FlexPWM
+train is at spec at 200 kHz — treat ≈ 100 kHz as the practical
+ceiling); ENA ≥ 5 µs before DIR. The bench FlexPWM driver uses 10 µs
+DIR setup / hold.
+
+**Final-build checks (open):**
+
+- [x] Decide TB6600 + NEMA 23 vs iHSS60-class closed-loop per axis —
+      **iHSS60 on every axis, 2026-09-05**; CLAUDE.md hardware contract
+      and invariants 3 / 7 updated.
+- [ ] Confirm on the built harness: carrier LED current through the
+      iHSS ALM/PED transistor (expect ≈ 10 mA, Vce(sat) < 1 V) and a
+      clean LOW at the Teensy pin.
+- [ ] Set P10 = 1 (fail-safe) with the HISU tool, or document that
+      P10 = 0 is in use and add a cable-present plausibility check.
+- [ ] Set P16 (position error limit) to a value meaningful for the
+      geared capacitor / inductor; the manual does not state the
+      encoder resolution, so measure counts-per-rev on the bench first.
+- [ ] Re-run the pin allocation (§7) once ALM/PED pins are final;
+      update `hal/board/t41_v209.h`.
+- [ ] Carry the DIR setup/hold and pulse-width limits into the
+      production motor HAL and into `docs/HARDWARE.md` per-driver table.
 
 ## 3 · GRBL control inputs (opto-isolated) — repurposed for tuner
 
@@ -84,7 +171,7 @@ reuses them for its own operational signals.
 | Pin  | grblHAL function | Board net  | Tuner use                                         |
 | ---- | ---------------- | ---------- | ------------------------------------------------- |
 | 14   | RESET            | RESET      | Operator panic — drive everything to BYPASS + halt |
-| 15   | PROBE            | PROBE      | Spare — RF-presence sense from external detector  |
+| 15   | PROBE            | PROBE      | Closed-loop driver **PED** (in-position) for the most stall-prone axis — §2.2 (verify at final build). Displaces the RF-presence spare |
 | 16   | FEED_HOLD        | FEED HOLD  | **TX-key panic** — hardware lockout while PTT'd    |
 | 17   | CYCLE_START      | CYCLE START | Engage-from-bypass momentary input                |
 | 29   | SAFETY_DOOR      | SAFETY DOOR | Enclosure interlock — refuse motion if open       |
@@ -101,7 +188,7 @@ GRBL-control inputs in §2 / §3. Call this the **tier-1 input bank**.
 | 30   | AUXINPUT1 / QEI_A        | Axis-1 encoder A (Phase 2)                        |
 | 34   | AUXINPUT2 / QEI_B        | Axis-1 encoder B (Phase 2)                        |
 | 35   | AUXINPUT3 / QEI_SELECT   | Axis-1 encoder Z / index (Phase 2)                |
-| 36   | AUXINPUT0                | Motor-fault aggregate (default); axis-2 encoder A if repurposed |
+| 36   | AUXINPUT0                | Motor-fault aggregate (default; moves to the opto inputs of §2.2 if closed-loop drives with ALM are adopted); axis-2 encoder A if repurposed |
 | 41   | AUXINPUT4 / I²C strobe   | spare (I²C bus if a daughterboard is fitted); axis-2 encoder B if repurposed |
 
 grblHAL's stock board map defines exactly one hardware-decoded
@@ -173,8 +260,10 @@ reasons:
   INT-assert to a completed INTCAP read. That ceilings sustainable
   rate at ~5 kHz aggregate edges across all watched pins. A
   100 PPR encoder (4× decode = 400 counts/rev) at typical bench
-  jog speeds (~1500 RPM motor, encoder on the rear shaft *before*
-  the gearbox) produces ~10 000 edges/s — past the ceiling. PCF8574
+  jog speeds (~1500 RPM motor, encoder on the motor shaft *before*
+  the gearbox — an external encoder is only possible with a
+  non-integrated motor, not the iHSS60) produces ~10 000 edges/s —
+  past the ceiling. PCF8574
   has no interrupt-on-change at all and is poll-only, which loses
   edges between any two reads.
 - **Bus contention + ISR cost.** Even when edge rate fits, each I²C
@@ -241,6 +330,9 @@ The pins our firmware actually drives, in topology order:
 | K2 (Lo-Z)         | 11         | SPINDLE DIR   |
 | K3 (Bypass)       | 19         | COOLANT FLOOD |
 | TX-key panic      | 16         | FEED HOLD     |
+| Driver ALM, L axis *(§2.2, verify at final build)* | 23 | A LIMIT |
+| Driver ALM, C axis *(§2.2, verify at final build)* | 28 | B LIMIT |
+| Driver PED, one axis *(§2.2, verify at final build)* | 15 | PROBE   |
 
 ### T-Match / Pi-Match (3 stepper axes)
 

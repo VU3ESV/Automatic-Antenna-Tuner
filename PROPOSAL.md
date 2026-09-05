@@ -186,6 +186,28 @@ fixed in the eventual tuner-controller firmware yet.
   laptop clients filter out at scan time. If a WiFi-bring-up board is
   ever used again, force `WIFI_PROTOCOL_11B|G|N` on the AP interface.
   Captured for completeness even though tuner-controller is Ethernet.
+- **Closed-loop integrated drives (JMC iHSS60, bench 2026-09) need
+  longer DIR timing than TB6600 and offer two feedback lines.** The
+  iHSS60 wants DIR stable ≥ 6 µs before the first pulse and unchanged
+  ≥ 5 µs after the last one (the bench FlexPWM driver used 2 µs and now
+  uses 10 µs for both), and ≥ 2.5 µs per pulse level, which puts its
+  200 kHz maximum exactly at the limit of a 50 %-duty train. Its ALM
+  (fault / following-error) and PED (in-position) opto outputs can sink
+  the V2.09 carrier's opto-input LED current directly with no added
+  parts — candidate wiring and the open final-build checks are in
+  [docs/HW-T41-PINMAP.md](docs/HW-T41-PINMAP.md) §2.1–2.2. The iHSS60
+  was adopted into the CLAUDE.md hardware contract on 2026-09-05;
+  final-build verification of the wiring is logged in
+  [docs/PLAN.md](docs/PLAN.md) M5.
+- **Cortex-M7 peripheral-flag clears need a `dsb` before the ISR
+  returns.** The FlexPWM reload ISR that counts step pulses cleared its
+  flag with a posted write and returned before it landed, so the NVIC
+  re-entered it for the same pulse: position counts ran 1.3–2× the real
+  pulses at some speeds and bounded moves ended early. One
+  `asm volatile("dsb")` at the end of the ISR fixed it (verified
+  8.11 / 2.09 / 1.06 s per 6400-step rev at 800 / 3200 / 6400 pps).
+  Applies equally to the STM32H743 fallback (also M7); every
+  flag-clearing ISR in the production HAL needs the barrier.
 
 ## Status
 
