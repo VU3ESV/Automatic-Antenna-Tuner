@@ -20,6 +20,14 @@ static void isr_flexpwm2_0() {
 
 // ─── FlexPwmStepper ────────────────────────────────────────────────────
 
+// DIR/STEP timing guards, sized for the slowest driver we expect to meet.
+// JMC iHSS60 (closed-loop) datasheet §5.5: DIR must lead the first active
+// PUL edge by ≥ 6 µs (t2) and must not change until ≥ 5 µs after the last
+// pulse (t5). TB6600 / DM542 / TMC2209 need ≤ 1 µs, so 10 µs covers all
+// of them with margin; it costs 10–20 µs once per move, nothing per step.
+static constexpr uint32_t DIR_SETUP_US = 10;   // DIR stable → first STEP edge
+static constexpr uint32_t DIR_HOLD_US  = 10;   // last STEP edge → DIR may change
+
 FlexPwmStepper::FlexPwmStepper(int stepPin, int dirPin,
                                IMXRT_FLEXPWM_t *pwm, uint8_t submodule,
                                IRQ_NUMBER_t irq)
@@ -85,11 +93,12 @@ long FlexPwmStepper::distanceToGo() const {
 
 void FlexPwmStepper::moveSteps(long n) {
     if (n == 0) return;
+    const bool wasRunning = _running;
     stop();
+    if (wasRunning) delayMicroseconds(DIR_HOLD_US);   // t5: don't flip DIR on the heels of a pulse
     _direction = (n > 0) ? 1 : -1;
     digitalWrite(_dirPin, _direction > 0 ? HIGH : LOW);
-    delayMicroseconds(2);  // DIR-to-STEP setup time (typ. ≥ 1 µs on
-                           // TB6600 / TMC2209 / DM542; 2 µs is safe)
+    delayMicroseconds(DIR_SETUP_US);                  // t2: DIR settled before first STEP edge
     noInterrupts();
     _remaining = (n > 0) ? n : -n;
     interrupts();
@@ -101,10 +110,12 @@ void FlexPwmStepper::moveTo(long target) {
 }
 
 void FlexPwmStepper::runContinuous(int dir) {
+    const bool wasRunning = _running;
     stop();
+    if (wasRunning) delayMicroseconds(DIR_HOLD_US);
     _direction = (dir > 0) ? 1 : -1;
     digitalWrite(_dirPin, _direction > 0 ? HIGH : LOW);
-    delayMicroseconds(2);
+    delayMicroseconds(DIR_SETUP_US);
     noInterrupts();
     _remaining = 0;  // 0 == infinite (ISR doesn't decrement)
     interrupts();
@@ -172,4 +183,14 @@ void FlexPwmStepper::handleIsr() {
     }
     // _remaining == 0 from the start means infinite (continuous) mode —
     // ISR just counts steps; pulse train runs until stop() is called.
+
+    // Cortex-M7 double-trigger guard. The W1C write that clears RF above
+    // is a posted write across the AIPS bridge; if this ISR returns before
+    // it lands, the NVIC still sees the IRQ line asserted and re-enters us
+    // once more for the same pulse — one extra position count and one
+    // extra --_remaining, so bounded moves end early. Observed on the
+    // bench 2026-09-05: 6400-count rev finished in 1.3 s at 3200 pps.
+    // DSB stalls until the write completes. Same idiom PJRC uses in the
+    // Teensy 4 core (IntervalTimer etc.). STM32H7 (also M7) needs it too.
+    asm volatile("dsb");
 }
