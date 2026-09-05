@@ -15,7 +15,7 @@ For the architecture this plan implements, see
 | M  | Name                        | Deliverable                                                                                            | Status (2026-05-11)                              |
 |----|-----------------------------|--------------------------------------------------------------------------------------------------------|--------------------------------------------------|
 | M0 | Scaffolding                 | Repo skeleton, CI, two binaries that build and exchange a heartbeat.                                   | **✅** (master + firmware skeleton + CI)         |
-| M1 | Motion + position           | Steppers move under encoder closed-loop; bypass + relay state machine; faked RF.                       | **M1a ✅ · M1b.1 ✅ · M1b.2 software half ✅ · M1b.2 real drivers pending HW** |
+| M1 | Motion + position           | iHSS60 axes drive the elements directly, homed by belt-driven lead-screw limit switches; bypass + relay state machine; faked RF. | **M1a ✅ · M1b.1 ✅ · M1b.2 software half ✅ · M1b.2 real drivers pending HW** |
 | M2 | Measurement                 | AD8302 + dual AD8307 chains live; SWR, R, X reported in `telemetry`.                                   | Pending hardware                                  |
 | M3 | Master core + GUI           | Go master with embedded web UI, CAT polling, ANO encoders, memory store.                               | Partial — UI + WS hub + Operate panel + command forwarding done; CAT / ANO encoders / SQLite memory pending |
 | M4 | Auto-tune algorithm         | Recall + analytic L-network solve + hill-climb fine-tune, validated on a dummy load network.           | Pending M2/M3                                     |
@@ -24,6 +24,40 @@ For the architecture this plan implements, see
 | M7 | Multi-antenna (Phase 2)     | Antenna abstraction, routing rules, memory schema with `antenna_id`, selector hardware.                | **Documented** in [`EXTENSIONS.md`](EXTENSIONS.md); gated on M5.   |
 | M8 | Multi-transceiver (Phase 2) | Second CAT + radio input matrix + per-radio routing, sequential TX (no SO2R yet).                      | **Documented**; gated on M7.                                       |
 | M9 | SO2R (Phase 2)              | Simultaneous TX on different antennas with BPF isolation + hardware interlock; ref 4O3A TGXL family.   | **Documented**; gated on M8.                                       |
+
+### Scope change 2026-09-05 — balanced networks, lead-screw limit switches
+
+Adopted after the iHSS60 bench work; contract in
+[`../CLAUDE.md`](../CLAUDE.md) "RF topology" / "Hardware contract",
+mechanics in [`HARDWARE.md`](HARDWARE.md) "Drive train":
+
+- Topologies are now **Balanced L-Network (default)** and **Balanced
+  Pi-Network**; the unbalanced L / T / Pi set with an output balun is
+  superseded and T-Match is dropped. The **1:1 current balun moves to
+  the transceiver side**, which closes the balun-ratio decision (#3
+  below).
+- The two roller inductors are a **synchronized pair on one motor** —
+  one firmware axis (`L`). Axis counts stay 2 (L) / 3 (Pi).
+- Every axis: **iHSS60 coupled directly to the element** (6400 steps
+  per element turn); a small GT2 pulley on the motor shaft belts 3:1 to
+  a parallel **lead screw** whose traveling nut block trips the **home
+  and max limit switches**, wired NC-in-series to one carrier opto
+  input.
+- `set_topology` carries an **operator-chosen element→motor map**; the
+  master gets a topology settings page (M3).
+
+Milestones touched: M1b.2 (limit mechanism, relays, topology verb),
+M3 (settings page), M4 (`L = 2 × L_leg`), M5 (leg-current balance,
+drive-train checks), Phase 2 (Balanced Pi auto-tune, optional fixed-cap
+bank).
+
+- [ ] **Reconcile the remaining docs** that still describe the
+      unbalanced design: `ARCHITECTURE.md`, `RF-DESIGN.md`,
+      `PROTOCOL.md` (add the `set_topology` entry with the element
+      map), `HW-T41-CARRIER.md`, `HW-T41-PINMAP.md` (two-switch axes,
+      opto-input budget, relay pairs), `TUNING.md`, `../README.md`,
+      `../PROPOSAL.md`, and the axis-mapping comment in
+      `firmware/tuner-controller/src/hal/board/t41_v209.h`.
 
 Numbers below assume one operator and an existing bench (scope, signal
 generator, dummy load + reactive simulator, RF wattmeter). Calendar weeks
@@ -70,8 +104,9 @@ Teensy case.**
 
 ## M1 — Motion + position (≈ 2 weeks)
 
-**Goal:** real steppers move real shafts under closed-loop encoder
-feedback. No RF involved; safety lockouts gated on a fake `fwd_w` value
+**Goal:** real iHSS60 axes drive real element shafts directly, with the
+drive's internal loop closed and the belt-driven lead-screw limit
+switches homing each axis. No RF involved; safety lockouts gated on a fake `fwd_w` value
 the master can inject.
 
 ### M1a — Software scaffold (no hardware) ✅
@@ -155,21 +190,66 @@ End-to-end: Teensy → master → browser shows real controller state.
       this carrier. Bare-Teensy dev wiring keeps working via a
       `hal/board/bench.h` env. Plan + reference URLs:
       [`HW-T41-CARRIER.md`](HW-T41-CARRIER.md).
-- [ ] Wire two iHSS60 integrated closed-loop steppers via the carrier's axis-0/axis-1 STEP/DIR/EN
-      screw terminals. Pick microstep resolution (default 1/16) and
-      current limit per motor spec. Drivers and end-stops (opto-isolated
-      inputs on the carrier) wire to limit-X / limit-Y per the V2.09
-      schematic. Vacuum relays K1/K2/K3 driven from the carrier's
-      relay-driver outputs 1–3 (12 V coil jumper).
+- [ ] Wire two iHSS60 integrated closed-loop steppers (`L`-pair, `C`)
+      via the carrier's axis-0/axis-1 STEP/DIR/EN screw terminals (a
+      third, axis 2, for a Balanced Pi build). DIP = 6400 p/r; P8/P9
+      currents and P16 following-error limit set via HISU for the
+      belt-driven load. Each axis's two lead-screw limit switches wire
+      NC-in-series to one carrier opto input (limit-X / limit-Y /
+      limit-Z). Vacuum relays K1/K2/K3 — each two-pole, switching both
+      line legs — driven from the carrier's relay-driver outputs 1–3
+      (12 V coil jumper).
+- [ ] **Build the limit mechanism** per [`HARDWARE.md`](HARDWARE.md)
+      "Drive train": motor coupled directly to the element shaft; small
+      GT2 pulley on the motor shaft, 3:1 belt to the large pulley on a
+      parallel lead screw; guided traveling nut block / wheel; home and
+      max switches positioned so they trip when the element is
+      `SAFE_MARGIN` inside each mechanical stop. L axis: 1:1 belt off
+      the motor shaft to the second roller inductor. Verify 6400 steps
+      per element revolution and one lead-screw turn per three element
+      turns on the bench; measure homing repeatability in steps and
+      pick lead-screw lead / switch type from the HARDWARE.md table.
+- [ ] Confirm each element's rated maximum shaft speed (vacuum-cap
+      bellows, roller-inductor contact) and set the production speed
+      limit from it — with direct drive, 6400 pps is 1 rev/s and the
+      bench-saved 25 600 pps is 4 rev/s.
+- [ ] **Limit-mechanism mitigations** (risk register in
+      [`HARDWARE.md`](HARDWARE.md) "Risks of the belt-driven lead-screw
+      limit mechanism"; rules in CLAUDE.md invariant 7): latched limit
+      events by direction, homing travel watchdog, home→max span check
+      against a stored reference, immediate pulse cut on trip, bounded
+      pull-off when a switch is active at power-up, `SAFE_MARGIN` ≥
+      stopping distance at homing speed, cam-actuated switches. Provoke
+      each on the bench — belt removed with the motor running toward a
+      switch, a switch held closed, power-up with the block on a switch,
+      a deliberate one-tooth belt shift — and confirm the firmware
+      response.
+- [ ] **Unpowered creep test (C axis):** mark the shaft, power the
+      drive off for 24 h with the capacitor at mid-travel and again at
+      each end, re-power and re-home; record the drift in steps. Decides
+      whether the NVRAM anchor can ever be trusted across a cold start
+      without confirmation (CLAUDE.md invariant 3 requires confirmation
+      until proven otherwise). See [`HARDWARE.md`](HARDWARE.md) "Memory
+      reliability with direct coupling".
+- [ ] **Inductor-pair tracking:** measure the inductance of each leg at
+      ≥ 5 positions across travel with the pair coupled; record the
+      mismatch curve. Acceptance target ≤ 2 % (revisit at M5 against
+      measured leg currents). Decide and document how the two coils are
+      phased so both rollers travel the same way.
 - [ ] Implement `motor` task with trapezoidal accel/decel; verify motion
       profile on scope.
-- [ ] Wire quadrature encoders into the Teensy's hardware QEI peripherals.
+- [ ] *(Phase-2 fallback only — a non-integrated motor; the iHSS60 has
+      no external encoder.)* Wire quadrature encoders into the Teensy's
+      hardware QEI peripherals.
       Verify count direction matches motor direction; document polarity.
       See [`ARCHITECTURE.md`](ARCHITECTURE.md) §5.2 for the encoder
       strategy (incremental + homing or NVRAM anchor; absolute as
       alternative).
-- [ ] Implement homing routine against the per-axis mechanical limit
-      switch (the iHSS60 has no StallGuard / sensorless homing). Persist
+- [ ] Implement homing routine against the per-axis lead-screw limit
+      switches (the iHSS60 has no StallGuard / sensorless homing):
+      approach the low switch from one direction at low speed, back off,
+      re-approach; the series-NC pair reads "at limit" at either end, so
+      use the last commanded direction to tell which. Persist
       post-homing position to NVRAM on every clean move complete so the
       next boot can skip homing when the last shutdown was clean.
 - [x] ~~Bring up Ethernet (QNEthernet on Teensy 4.1) and a minimal WS
@@ -179,17 +259,21 @@ End-to-end: Teensy → master → browser shows real controller state.
       payload format is unchanged.
 - [x] Verb set for M1: `move_l`, `move_c`, `home`, `set_side`,
       `set_bypass`, `resync`. All wired end-to-end against the sim HAL.
-- [ ] **Topology declaration**: add `set_topology` verb (kind: `L`,
-      `T`, `Pi`; element map per [`../CLAUDE.md`](../CLAUDE.md) RF
-      topology + [`HW-T41-CARRIER.md`](HW-T41-CARRIER.md) §"Topology
-      selection"). Persist the chosen topology to NVRAM; refuse every
-      motion verb until topology is declared. M1 only exercises the
-      L-Match path end-to-end; the T/Pi cases land as inert switch
-      arms (motion HAL works for any declared axis count, but
-      L-Match-specific `set_side` is rejected with `wrong_topology` on
-      T/Pi installs).
+- [ ] **Topology declaration**: add `set_topology` verb (kind:
+      `balanced_l`, `balanced_pi`; element map with operator-chosen
+      element→axis bindings and the `pair` flag on `L`, per
+      [`../CLAUDE.md`](../CLAUDE.md) "RF topology" +
+      [`HW-T41-CARRIER.md`](HW-T41-CARRIER.md) §"Topology selection").
+      Reject duplicate axis bindings. Persist the chosen topology to
+      NVRAM; refuse every motion verb until topology is declared. M1
+      only exercises the Balanced L path end-to-end; Balanced Pi lands
+      as an inert switch arm (motion HAL works for any declared axis
+      count, but the Balanced-L-specific `set_side` is rejected with
+      `wrong_topology` on a Pi install).
 - [ ] Wire vacuum relays through optoisolated MOSFET drivers + HV bias;
-      implement K1/K2 mutual-exclusion + K3 override in firmware.
+      each logical relay is two-pole (both line legs; paralleled coils
+      on one driver, or a DPST/DPDT unit). Implement K1/K2
+      mutual-exclusion + K3 override in firmware.
 - [x] `safety` task: refuses `move_l`/`move_c`/`set_side`/`home` when
       `fwd_w >= tx_lockout_w` (5 W default). Master can drive the
       fake reading via the `set_fwd_w` debug verb so the lockout path
@@ -203,9 +287,10 @@ End-to-end: Teensy → master → browser shows real controller state.
 - [x] Master GUI: "Operate" panel with L/C step nudges, side toggle,
       bypass engage, home, fake-Fwd-W injector. ANO-encoder wiring
       moves to M3 alongside the rest of the master-input work.
-- [ ] Bench validation: drive each axis full-range, confirm encoder counts
-      match expected step counts within ±1 LSB after each move; latch
-      bypass on every state change.
+- [ ] Bench validation: drive each axis full-range, confirm PED arrival
+      and no ALM after every move, confirm the limit switches trip at the
+      commissioned step counts at both ends, and that the L-pair coils
+      stay in step across the travel; latch bypass on every state change.
 
 **Exit criteria:** with no RF on the system, the operator can drive both
 axes from end to end via the GUI and via the ANO encoders, see live
@@ -292,6 +377,11 @@ from memory works; manual operation via encoders is polished.
       banner and offer one-touch *Recall*.
 - [ ] Memory page in the web UI: table, edit/delete, export to JSON for
       backup.
+- [ ] **Topology settings page:** choose Balanced L / Balanced Pi,
+      assign a motor (HAL axis) to each element, save to the TOML
+      `[topology]` table; the master sends `set_topology` on every
+      connect and shows the declared map (and a "shared control" style
+      warning if the controller reports a different persisted topology).
 - [ ] Auto-recall mode toggle (off by default). When on, QRG changes
       trigger `recall` automatically, with a 2 s debounce.
 - [ ] ANO encoders: rotate = nudge, push = save current as memory for
@@ -318,9 +408,13 @@ hill-climb refine).
 
 - [ ] Analytic L-network solver in master Go code, fed by the latest
       `r`, `x` from `telemetry` while bypass is engaged at low power.
-- [ ] Per-axis calibration curves (`L(steps)`, `C(steps)`) derived from a
-      one-time sweep at install; stored in TOML on the master, served
-      to the controller on connect.
+      Balanced form: the series element is `L = 2 × L_leg` and `C` sits
+      across the line; the solver is otherwise the unbalanced one.
+      Balanced Pi search is Phase 2.
+- [ ] Per-axis calibration curves (`L_leg(steps)` for the pair,
+      `C(steps)` per capacitor) derived from a one-time sweep at
+      install; stored in TOML on the master, served to the controller
+      on connect.
 - [ ] Hill-climb fine tuner: search in `(l_steps, c_steps)` with adaptive
       step size, watchdog (max iterations), and operator cancel.
 - [ ] Algorithm validation on a *reactive-load simulator* (R/L/C network
@@ -345,12 +439,26 @@ the tuner's own chain and the LP-100A as a cross-check.
       antenna base). Run weatherproofed Ethernet + 230 V mains.
 - [ ] Initial bring-up at QRP (≤ 5 W) on every band; ensure auto-tune
       converges; log measured R, X for the band's centre.
-- [ ] Ladder line check: confirm common-mode currents are tolerable with
-      the chosen balun ratio (1:1 vs 4:1 decision happens *here*, based
-      on measured impedance ranges, not earlier).
+- [ ] Ladder line check: confirm common-mode current is tolerable with
+      the 1:1 transceiver-side balun, and measure the RF current in each
+      line leg (clamp-on RF ammeter) at several settings per band — leg
+      balance is the balanced network's reason to exist, and any
+      inductor-pair tracking error shows up here first.
+- [ ] **Limit-mechanism commissioning:** re-check limit-switch trip points
+      (steps) at both ends of every axis after the first full-power
+      thermal cycle; confirm belt tension and that homing repeatability
+      is within the M1b.2 target; record lead-screw lead, pulley teeth,
+      switch positions and the home→max span reference in
+      `docs/HARDWARE.md` §2 / §4, and set the §10 inspection interval
+      for belts and switches.
 - [ ] Build the memory table: walk every band in 25 / 50 / 100 kHz
       buckets per [`ARCHITECTURE.md`](ARCHITECTURE.md) §5.4, save a slot
       at each.
+- [ ] Recall accuracy after a re-home on 10 m and 6 m: `home`, then
+      recall each slot and record the SWR before the hill-climb runs.
+      This is the real-world measure of the lead-screw anchor
+      ([`HARDWARE.md`](HARDWARE.md) "Memory reliability with direct
+      coupling") and feeds open decision 11.
 - [ ] Power ramp: QRP → 100 W → legal limit, monitor heating and SWR
       stability. Document max continuous power per band.
 - [ ] 48 h on-air soak: leave the master + tuner running, exercise from
@@ -437,6 +545,12 @@ Phase 2 is **documented but not scheduled.** Phase 2 milestones are
 gated on M5 (Phase 1 RF commissioning) being clean; commissioning
 findings may reshape the M7 scope.
 
+Two further Phase-2 items fall out of the 2026-09-05 topology change
+and are independent of the multi-antenna work: **Balanced Pi
+auto-tune** (the three-element search algorithm) and an optional
+**switched fixed-capacitor bank** in parallel with the transceiver-side
+capacitor for range extension on 160 m.
+
 ### M7 — Multi-antenna (single radio)
 
 **Goal:** operator switches between Doublet, HexBeam, and any other
@@ -520,30 +634,41 @@ the architecture, only the BoM:
    drivers, and the PJRC Ethernet Kit footprint. Avoids a custom-PCB
    spin for Phase 1; revisited as part of the Phase-1/Phase-2 go/no-go
    in M5. Plan + reference URLs: [`HW-T41-CARRIER.md`](HW-T41-CARRIER.md).
-1b. **Tuner topology** — L-Match is the Phase 1 default and the only
-   topology with auto-tune in scope through M6. T-Match and Pi-Match
-   are first-class supported through the HAL / protocol / "drive each
-   element to a commanded position" path; auto-tune for T/Pi is a
-   Phase-2 deliverable. See [`../CLAUDE.md`](../CLAUDE.md) §"RF
-   topology" for the topology selection mechanism.
+1b. **Tuner topology** — *decided 2026-09-05:* **Balanced L-Network**
+   is the Phase 1 default and the only topology with auto-tune in
+   scope through M6. **Balanced Pi-Network** is first-class supported
+   through the HAL / protocol / "drive each element to a commanded
+   position" path; its auto-tune is a Phase-2 deliverable. The
+   unbalanced L / T / Pi set is superseded and T-Match dropped. See
+   [`../CLAUDE.md`](../CLAUDE.md) §"RF topology" for the topology
+   selection mechanism and the element→motor map.
 2. **Ethernet library.** **QNEthernet** (lwIP) is the default; the
    build also supports **NativeEthernet** (FNET) via a separate PIO env
    for A/B testing and to match the Morconi / TeensyMaestro convention.
    The abstraction lives in `src/net_hal.{h,*.cpp}`; the choice is a
    one-line change in `platformio.ini`. See
    [`ARCHITECTURE.md`](ARCHITECTURE.md) §5.1.2.
-3. **Balun ratio (1:1 vs 4:1).** Resolved during M5 when actual ladder-line
-   impedances are measured. Carry both on the BoM until then.
+3. **Balun ratio.** *Resolved 2026-09-05 by the topology change:* 1:1
+   Guanella current balun on the transceiver side, working at 50 Ω. M5
+   verifies leg balance and common-mode current instead of choosing a
+   ratio.
 4. **Power rating target.** Default to **400 W continuous, 1.5 kW peak**
    in BoM sizing (matches VU3ESV regional legal limit + headroom). If the
    user wants legal-limit US (1.5 kW continuous), upsize the cap voltage
    rating (Jennings UCSL-1500 → CMV1-1500, 7.5 kV) and the relay rating.
-5. **Stepper-driver microstep resolution.** Default 1/16; lower means
-   smoother but slower. Confirm during M1 against actual roller-inductor
-   mechanics.
-6. **Encoder CPR and type.** Default: **2000 CPR incremental
-   quadrature** (resolves ~0.1 % of end-to-end travel per count).
-   Higher CPR is fine. **Absolute encoders** (SSI / BiSS) are supported
+5. **Step resolution and limit mechanism.** *Resolved 2026-09-05:*
+   iHSS60 DIP 6400 p/r, direct drive = 6400 steps per element turn; the
+   3:1 GT2 belt drives only the limit-switch lead screw. Remaining:
+   lead-screw lead per axis (block travel = turns / 3 × lead must fit
+   the enclosure, and home repeatability in steps improves with a
+   larger lead), pulley tooth counts, switch type, and each element's
+   max shaft speed — decide in M1b.2. See [`HARDWARE.md`](HARDWARE.md)
+   "Drive train".
+6. **Encoder CPR and type.** *Superseded 2026-09-05:* the iHSS60's
+   internal encoder closes the loop and the controller sees ALM / PED
+   only. The rest of this item applies only to a Phase-2 non-integrated
+   motor. Original default: **2000 CPR incremental quadrature**
+   (resolves ~0.1 % of end-to-end travel per count). Higher CPR is fine. **Absolute encoders** (SSI / BiSS) are supported
    as a per-axis alternative via the HAL; the L axis is the natural
    candidate if its mechanical home is too slow to reach on every
    power-up. See [`ARCHITECTURE.md`](ARCHITECTURE.md) §5.2 for the
@@ -554,6 +679,21 @@ the architecture, only the BoM:
 8. **Optional LP-100A integration.** The architecture already supports
    subscribing to LP-100A-Server as a second-opinion source. Build it if
    the user wants a cross-check display; skip otherwise.
+9. **Vacuum-relay pole arrangement.** Two SPST/SPDT relays with
+   paralleled coils per logical switch vs one DPST/DPDT unit. Affects
+   BoM count (6 contacts for Balanced L, 2 for Balanced Pi), HV-bias
+   supply loading, and relay-driver current. Decide at M1b.2 relay
+   wiring.
+10. **Fixed-capacitor bank.** Whether the 10–1500 pF vacuum capacitor
+   covers 160 m without switched fixed caps in parallel; decide from
+   M5 measured impedances. Phase 2 if needed.
+11. **Absolute position sensing for the anchor.** Options: a linear
+   potentiometer or magnetic linear sensor along the lead-screw block
+   (coarse absolute position at power-up, no motion needed), and a
+   multi-turn absolute encoder on a free roller-inductor shaft end.
+   Decide after the M1b.2 repeatability and creep measurements and the
+   M5 re-homed recall results on 10 m / 6 m. Phase 2 unless M5 shows
+   re-homed recall is not good enough on the high bands.
 
 These should be answered in conversation before scaffolding decisions
 that depend on them — most realistically, during M0.
