@@ -134,18 +134,23 @@ Phase-2 deliverable (see [docs/PLAN.md](docs/PLAN.md)).
 2. **Bypass on power-up.** K3 latches the network out of circuit on every
    boot until the controller has read both encoders, confirmed plausible
    positions, and received an explicit "engage" command.
-3. **Encoders are the position truth, anchored to a known reference.**
-   Stepper step counts are open-loop and drift (stalls, end-stop hits,
-   power-cycle while moving); on boot and after every move the controller
-   reads the encoder counts and treats those as the actual position, with
-   the step counter reset to match. An incremental encoder's count is
-   anchored to either (a) the last `home` routine within this power
+3. **Position truth is anchored to a known reference — never a bare
+   pulse count.** With the iHSS60 integrated closed-loop drives the
+   position loop closes inside the drive, so the controller's pulse
+   counter equals the shaft position *only while* the drive's ALM line
+   is clear and PED confirms arrival after each bounded move. An ALM
+   trip (following error, over-current, over-voltage) means shaft and
+   counter have diverged: the controller MUST stop pulses on that axis
+   and report `homed:false`. The counter is anchored to either (a) the
+   last `home` routine (mechanical limit switch) within this power
    cycle, or (b) a clean position record persisted to NVRAM at last
    `bypass=true` shutdown; if neither is valid the controller refuses
-   motion verbs except `home` and reports `homed:false` in `state`. An
-   absolute SSI encoder, if fitted to an axis, is self-anchoring and
-   skips this dance. Both pathways live behind the same HAL —
-   application code is encoder-kind-agnostic. See
+   motion verbs except `home` and reports `homed:false` in `state`. If
+   an external encoder is fitted to an axis (non-integrated motor), its
+   counts replace the pulse counter as the position source under the
+   same anchoring rules; an absolute SSI encoder is self-anchoring. All
+   pathways live behind the same HAL — application code is
+   feedback-kind-agnostic. See
    [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §5.2.
 4. **Memory writes are explicit.** The master never silently overwrites a
    memory slot. A user adjustment with the encoders updates a working
@@ -162,17 +167,22 @@ Phase-2 deliverable (see [docs/PLAN.md](docs/PLAN.md)).
    30/20/17/15/12 m, 100 kHz on 10/6 m). Falling back to band-only
    defaults is a last resort.
 7. **Vacuum-variable cap is protected by a defence-in-depth stack, not
-   by trusting the stepper.** TB6600 is open-loop with no stall feedback.
-   The firmware MUST enforce, in order: driver current set to motor-rated
-   (not max) at commissioning; refusal of all motion verbs except `home`
-   while `homed:false`; per-axis software soft limits sitting
-   `SAFE_MARGIN` steps inside the limit-switch position (default 100);
-   per-axis mechanical limit switch as the hardware fallback;
-   optional rear-shaft encoder for post-move stall detection when fitted.
-   The first install-time commissioning must map each limit-switch
-   position to a safe number of steps inside the cap's mechanical
-   stop, both ends, and persist it to NVRAM with the per-axis topology
-   block. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §5.2.5.
+   by trusting the pulse train.** The iHSS60 closes its loop internally
+   but reports only pass/fail. The firmware and commissioning MUST
+   enforce, in order: drive currents (P8/P9) and following-error limit
+   (P16) set for the geared load at install time via the HISU tool;
+   ALM wired to a carrier opto input (fail-safe polarity P10 = 1
+   preferred) with any trip stopping pulses and setting `homed:false`;
+   refusal of all motion verbs except `home` while `homed:false`;
+   per-axis software soft limits sitting `SAFE_MARGIN` steps inside the
+   limit-switch position (default 100); per-axis mechanical limit switch
+   as the hardware fallback; PED required before a bounded move is
+   recorded as complete. The first install-time commissioning must map
+   each limit-switch position to a safe number of steps inside the
+   cap's mechanical stop, both ends, and persist it to NVRAM with the
+   per-axis topology block. See
+   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §5.2.5 and
+   [docs/HW-T41-PINMAP.md](docs/HW-T41-PINMAP.md) §2.2.
 
 ## WebSocket protocol (summary; full spec in [docs/PROTOCOL.md](docs/PROTOCOL.md))
 
@@ -215,9 +225,9 @@ Frame examples and error semantics: [docs/PROTOCOL.md](docs/PROTOCOL.md).
 |------------------------|----------------------------------------------|------------------------------------------------------------------------|
 | Tuner-side MCU         | **Teensy 4.1** (NXP i.MX RT1062, 600 MHz) — **Phase 1** | Hardware QEI, 16-bit ADC, native Ethernet PHY (PJRC kit), microSD on-board. PSRAM + 2nd QSPI flash footprints for expansion. **Phase 2 migration target: STM32H743 on a custom board** if RF immunity testing at M5 surfaces problems (see "MCU selection" below). |
 | Tuner-side carrier     | **grblHAL-teensy-4.x V2.09** (Phil Barrett, T41E5XBB SKU for Ethernet) — **Phase 1** | Off-the-shelf Teensy 4.1 carrier with 5 stepper-driver channels, 10 opto-isolated inputs, 7 relay drivers, and the PJRC Ethernet Kit footprint. Avoids a custom carrier PCB for Phase 1; revisited at the M5 Phase-2 decision. Full mapping in [docs/HW-T41-CARRIER.md](docs/HW-T41-CARRIER.md). |
-| Reactive-element axes  | 2 (L-Match) or 3 (T-Match / Pi-Match)        | Each axis: stepper + driver + mechanical end-stop, with an optional encoder on the motor's rear shaft. Axis count is a function of declared topology, not a build-time choice. |
-| Element actuators      | **NEMA 23 stepper** + planetary gearbox → roller inductor / vacuum-variable capacitor shaft. Motor has an **extended shaft on both ends** so an optional rear-shaft encoder can be added without disturbing the gearbox or coupling on the front shaft. | Driver: **TB6600** (opto-isolated; active-LOW ENA, ≥ 5 µs STEP pulse width — both quirks documented in PROPOSAL.md "Bench-test learnings"). No StallGuard / sensorless homing — Phase 1 relies on the per-axis mechanical limit switch for homing (see [docs/HW-T41-PINMAP.md](docs/HW-T41-PINMAP.md) §2). Step pulses are hardware-generated via FlexPWM, not loop-polled — bench reference impl in [firmware/t41-stepper-test/src/flexpwm_stepper.h](firmware/t41-stepper-test/src/flexpwm_stepper.h). Cap example: Jennings UCSL-1500 (10–1500 pF, 5 kV). |
-| Position encoder       | **Optional**, per-axis. Incremental quadrature optical, 2000+ CPR, mounted on the motor's rear extended shaft. | Phase 1 ships without encoders — step pulses are exactly counted in the FlexPWM reload ISR, so the open-loop counter is the position source for the bench-tested control loop. Encoders can be added per axis when invariant 3's drift-detection role is needed (e.g., when a Phase-2 RF-environment investigation finds load-induced stalls). Same HAL surface either way. When fitted, anchored by the mechanical limit-switch home and a clean-shutdown NVRAM record — see docs/ARCHITECTURE.md §5.2. Absolute SSI is a per-axis drop-in alternative via the same HAL. |
+| Reactive-element axes  | 2 (L-Match) or 3 (T-Match / Pi-Match)        | Each axis: one integrated closed-loop stepper (servo driver on the motor) + mechanical end-stop + the drive's ALM / PED feedback lines into carrier opto inputs. Axis count is a function of declared topology, not a build-time choice. |
+| Element actuators      | **JMC iHSS60 integrated closed-loop stepper** (NEMA 24 / 60 mm frame; bench unit iHSS60-36-30, 118 mm long) + planetary gearbox → roller inductor / vacuum-variable capacitor shaft. The servo driver is built onto the motor's rear, so there is **no free rear shaft**; position feedback is the drive's internal optical encoder (50 µs sampling), visible to the controller only as **ALM** (fault) and **PED** (arrived) opto outputs. Adopted 2026-09-05, replacing TB6600 + NEMA 23. | Drive spec (iHSS60 manual V1.1, rocketronics.de): 24–50 VDC (36 V typ.), 4.5 A, 200 kHz max pulse, PUL/DIR/ENA opto inputs 5 V or 24 V compatible, over-current 8 A, over-voltage 80 V. **Pulses/rev set by DIP to 6400** (SW1 on, SW2 on, SW3 off, SW4 on); SW5 = active edge, SW6 = direction; P1–P20 (currents, PID, P10 alarm polarity, P14 arrival polarity, P16 following-error limit, P19 smoothing, P20 user p/r) only via the RS-232 HISU port. **Timing the HAL MUST honour (manual §5.5):** ENA ≥ 5 µs before DIR; DIR stable ≥ 6 µs before the first PUL edge and unchanged ≥ 5 µs after the last; PUL high and low each ≥ 2.5 µs, so a 50 %-duty train is at spec only up to 200 kHz — treat ≈ 100 kHz as the practical ceiling. Step pulses are hardware-generated via FlexPWM, not loop-polled — bench reference impl in [firmware/t41-stepper-test/src/flexpwm_stepper.h](firmware/t41-stepper-test/src/flexpwm_stepper.h) (10 µs DIR setup/hold, `dsb` in the reload ISR). Homing: per-axis mechanical limit switch (see [docs/HW-T41-PINMAP.md](docs/HW-T41-PINMAP.md) §2); ALM/PED wiring and open final-build checks in §2.2. TB6600's ENA-polarity and 5 µs quirks stay documented in PROPOSAL.md "Bench-test learnings" for anyone re-using the bench rigs. Cap example: Jennings UCSL-1500 (10–1500 pF, 5 kV). |
+| Position encoder       | **Inside the drive.** The iHSS60's optical encoder closes the position loop within the drive; the controller never sees counts, only ALM (fault / following error beyond P16 × 10 counts) and PED (arrived within tolerance). No external rear-shaft encoder is possible on the integrated unit. | The controller's pulse counter (exact — counted in the FlexPWM reload ISR) is the position source, trustworthy while ALM is clear; PED confirms each bounded move landed before the position is persisted. External incremental / absolute-SSI encoders remain a per-axis option behind the same HAL only for a non-integrated motor (Phase-2 fallback). Anchoring rules (limit-switch home, clean-shutdown NVRAM record) — see docs/ARCHITECTURE.md §5.2. |
 | Vacuum relays          | Gigavac G2/G81 or Kilovac H-series, SPDT      | 26 V coil, HV bias supply. Hot-switch protection in firmware (TX lock).|
 | Balun                  | 1:1 or 4:1 current balun, ferrite (Fair-Rite 43 / 31) | Fixed, on the output. Spec: ≥3 kW dissipation safety margin.      |
 | RF detector            | **AD8302** (gain/phase) + dual log detector (AD8307 ×2 on Fwd/Rev tap) | AD8302 for complex Z; AD8307 pair for SWR/return loss. |

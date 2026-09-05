@@ -21,6 +21,7 @@
 //   S / A    Active axis: set speed / acceleration
 //   T        Active axis: toggle ENA pin (test driver polarity)
 //   Z        Active axis: set current position = home (0), save to EEPROM
+//   W        Active axis: save current speed + accel to EEPROM (restored at boot)
 //   E / D    Enable / disable ALL axes
 //   Q        Toggle idle auto-release (global, persisted in EEPROM)
 //   N        Print network status (Ethernet backend, link, IP)
@@ -40,8 +41,11 @@
 // HTTP control surface (when DHCP succeeds):
 //   - http://<dhcp-ip>/  serves a one-page web UI mirroring the Serial
 //     menu (jog ±100, ±1/N revs, continuous CW/CCW, stop, e-stop,
-//     speed/accel, enable/disable, idle-release toggle, zero/home).
+//     speed/accel + save-speed, enable/disable, idle-release toggle,
+//     set-current-position-as-home).
 //   - JSON status at /api/status (polled by the UI every 500 ms).
+//     Each axis carries rev_job {revs,dir,done,left,state} so the UI can
+//     show rotate-N progress ("12.3 / 40 revs") until the next command.
 //   - GET-only verb endpoints under /api/* — same code paths as the
 //     Serial handlers, so HTTP and Serial can never disagree.
 //   - LAN-only, no auth (same posture as LP-100A-Server).
@@ -53,6 +57,18 @@
 //   - Per-axis step position is saved on every move-stop and throttled (1 s)
 //     during continuous mode, so a power-cycle has a near-current anchor.
 //   - Idle auto-release preference survives reboots.
+//   - Per-axis speed and accel are saved only on explicit request (W key /
+//     "Save spd+acc" button) and restored at boot; defaults 800 steps/s,
+//     25600 steps/s².
+//
+// Motion profile:
+//   - Rotate-N and boot-time homing use a trapezoidal ramp: start at
+//     RAMP_MIN_SPEED, accelerate at the axis' accel setting to its speed
+//     setting, decelerate so the last pulses land near RAMP_MIN_SPEED.
+//     The ramp is stepped from the main loop (serviceRamp, 1 ms tick) by
+//     re-programming the FlexPWM period; the end position is still exact
+//     because the reload ISR stops the train on the counted step.
+//   - Jog (100 steps) and continuous mode remain constant-velocity.
 //   - Schema upgrade automatic — old v1 EEPROM contents are recognised and
 //     re-initialised to defaults (position = 0 per axis, release = ON).
 //
@@ -103,18 +119,39 @@ static constexpr uint8_t PIN_Y_EN    = board::AXIS_Y.en;
 static constexpr uint8_t PIN_Y_LIMIT = board::AXIS_Y.limit;
 
 // ── Defaults (match your driver's micro-stepping setting) ───────────────
-static const int   STEPS_PER_REV = 1600;   // 1/8 micro-stepping on a 1.8° motor
+static const int   STEPS_PER_REV = 6400;   // closed-loop NEMA 24 driver configured for 6400 pulses/rev (1.8° motor, 1/32 equivalent)
 
 // ── EEPROM layout (schema v2) ───────────────────────────────────────────
 //   0..3   uint32_t magic    (=NVS_MAGIC when our v2 schema is written)
 //   4..7    int32_t X position
 //   8..11   int32_t Y position
 //   12      uint8_t  idleAutoRelease (0/1)
-static const int      EE_ADDR_MAGIC    = 0;
-static const int      EE_ADDR_POS_X    = 4;
-static const int      EE_ADDR_POS_Y    = 8;
-static const int      EE_ADDR_RELEASE  = 12;
-static const uint32_t NVS_MAGIC_V2     = 0x41544132UL;  // 'ATA2' — recognises v2 schema
+//   16..19  uint32_t motion-block magic ('ATSP' = speeds only, 'ATS2' = +accels)
+//   20..23  uint32_t X saved speed (steps/s)
+//   24..27  uint32_t Y saved speed (steps/s)
+//   28..31  uint32_t X saved accel (steps/s²)
+//   32..35  uint32_t Y saved accel (steps/s²)
+// The motion block carries its own magic so adding it did not invalidate
+// the v2 position records already stored on boards in the field; an
+// 'ATSP' block is upgraded in place (accels defaulted, speeds kept).
+static const int      EE_ADDR_MAGIC       = 0;
+static const int      EE_ADDR_POS_X       = 4;
+static const int      EE_ADDR_POS_Y       = 8;
+static const int      EE_ADDR_RELEASE     = 12;
+static const int      EE_ADDR_SPEED_MAGIC = 16;
+static const int      EE_ADDR_SPEED_X     = 20;
+static const int      EE_ADDR_SPEED_Y     = 24;
+static const int      EE_ADDR_ACCEL_X     = 28;
+static const int      EE_ADDR_ACCEL_Y     = 32;
+static const uint32_t NVS_MAGIC_V2        = 0x41544132UL;  // 'ATA2' — recognises v2 schema
+static const uint32_t NVS_SPEED_MAGIC     = 0x41545350UL;  // 'ATSP' — motion block v1 (speeds)
+static const uint32_t NVS_MOTION_MAGIC    = 0x41545332UL;  // 'ATS2' — motion block v2 (+accels)
+static const uint32_t DEFAULT_SPEED_HZ    = 800;           // when nothing has been saved
+static const uint32_t DEFAULT_ACCEL_HZ2   = 25600;         // steps/s² — 0→25600 steps/s in 1 s
+
+// ── Trapezoidal ramp (rotate-N / homing) ────────────────────────────────
+static const float         RAMP_MIN_SPEED = 400.0f;   // steps/s: start / end rate of a ramped move
+static const unsigned long RAMP_TICK_US   = 1000;     // ramp update period (main-loop paced)
 
 // ── Per-axis state ──────────────────────────────────────────────────────
 
@@ -125,6 +162,8 @@ struct Axis {
     uint8_t           pin_en;
     uint8_t           pin_limit;
     int               ee_pos_addr;
+    int               ee_speed_addr;
+    int               ee_accel_addr;
     FlexPwmStepper    stepper;
 
     // Position-persistence state
@@ -141,12 +180,18 @@ struct Axis {
     int               continuousDir   = 1;
     long              lastReportedRev = 0;
 
-    // Per-axis motion settings. Accel is no-op on FlexPwmStepper —
-    // motor runs at constant velocity — but kept on the struct so the
-    // JSON / serial menu / set-accel command paths still have a place
-    // to store it (display-only; no longer applied to the driver).
+    // Per-axis motion settings (both replaced at boot by the EEPROM values).
+    // currentSpeed is the cruise rate; currentAccel is the ramp rate used
+    // by rotate-N / homing moves (jog + continuous ignore it).
     float             currentSpeed    = 800.0f;
-    float             currentAccel    = 400.0f;
+    float             currentAccel    = 25600.0f;
+    float             savedSpeed      = 0.0f;     // last values persisted via W / "Save spd+acc"
+    float             savedAccel      = 0.0f;
+
+    // Trapezoidal ramp state for the bounded move in flight (see serviceRamp).
+    bool              rampActive      = false;
+    float             rampSpeed       = 0.0f;     // rate currently programmed into FlexPWM
+    unsigned long     rampLastUs      = 0;
 
     // Limit-switch debounced state (HIGH = released, LOW = asserted)
     int               limitLastState  = HIGH;
@@ -156,10 +201,20 @@ struct Axis {
     // operator overrides with any other motion command).
     bool              homing          = false;
 
-    Axis(const char* n, uint8_t s, uint8_t d, uint8_t e, uint8_t l, int ee_addr,
+    // Rotate-N-revolutions job tracking (UI progress). Set by
+    // moveRevolutions(); cleared by any other motion verb (jog,
+    // continuous, homing, zero). Deliberately NOT cleared by stop /
+    // e-stop so the UI keeps showing "stopped at 12.3 / 40".
+    int               revJobRevs      = 0;   // requested revs, 0 = none
+    int               revJobDir       = 0;   // +1 CW / -1 CCW
+    long              revJobStartPos  = 0;
+    long              revJobTargetPos = 0;
+
+    Axis(const char* n, uint8_t s, uint8_t d, uint8_t e, uint8_t l,
+         int ee_addr, int ee_spd_addr, int ee_acc_addr,
          IMXRT_FLEXPWM_t* pwm, uint8_t submodule, IRQ_NUMBER_t irq)
         : name(n), pin_step(s), pin_dir(d), pin_en(e), pin_limit(l),
-          ee_pos_addr(ee_addr),
+          ee_pos_addr(ee_addr), ee_speed_addr(ee_spd_addr), ee_accel_addr(ee_acc_addr),
           stepper(s, d, pwm, submodule, irq) {}
 };
 
@@ -169,9 +224,9 @@ struct Axis {
 // contention. If you ever wire Z/M3/M4 STEP pins, add the right
 // (pwm, submodule, irq) triple here AND a dispatch slot in
 // flexpwm_stepper.cpp.
-static Axis xAxis("X", PIN_X_STEP, PIN_X_DIR, PIN_X_EN, PIN_X_LIMIT, EE_ADDR_POS_X,
+static Axis xAxis("X", PIN_X_STEP, PIN_X_DIR, PIN_X_EN, PIN_X_LIMIT, EE_ADDR_POS_X, EE_ADDR_SPEED_X, EE_ADDR_ACCEL_X,
                   &IMXRT_FLEXPWM4, 2, IRQ_FLEXPWM4_2);
-static Axis yAxis("Y", PIN_Y_STEP, PIN_Y_DIR, PIN_Y_EN, PIN_Y_LIMIT, EE_ADDR_POS_Y,
+static Axis yAxis("Y", PIN_Y_STEP, PIN_Y_DIR, PIN_Y_EN, PIN_Y_LIMIT, EE_ADDR_POS_Y, EE_ADDR_SPEED_Y, EE_ADDR_ACCEL_Y,
                   &IMXRT_FLEXPWM2, 0, IRQ_FLEXPWM2_0);
 static Axis* const axes[] = { &xAxis, &yAxis };
 static const int NUM_AXES = sizeof(axes) / sizeof(axes[0]);
@@ -241,6 +296,56 @@ static void nvsSaveRelease(bool on) {
     EEPROM.put(EE_ADDR_RELEASE, v);
 }
 
+// ── Motion block: saved speed + accel (own magic — see EEPROM layout) ────
+static void nvsInitSpeed() {
+    uint32_t magic = 0;
+    EEPROM.get(EE_ADDR_SPEED_MAGIC, magic);
+    if (magic == NVS_MOTION_MAGIC) return;
+    if (magic == NVS_SPEED_MAGIC) {
+        // v1 block: keep the saved speeds, add default accels.
+        EEPROM.put(EE_ADDR_ACCEL_X, DEFAULT_ACCEL_HZ2);
+        EEPROM.put(EE_ADDR_ACCEL_Y, DEFAULT_ACCEL_HZ2);
+        EEPROM.put(EE_ADDR_SPEED_MAGIC, NVS_MOTION_MAGIC);
+        Serial.println(F("EEPROM: motion block upgraded (speeds kept, accel = 25600 steps/s²)."));
+        return;
+    }
+    EEPROM.put(EE_ADDR_SPEED_X, DEFAULT_SPEED_HZ);
+    EEPROM.put(EE_ADDR_SPEED_Y, DEFAULT_SPEED_HZ);
+    EEPROM.put(EE_ADDR_ACCEL_X, DEFAULT_ACCEL_HZ2);
+    EEPROM.put(EE_ADDR_ACCEL_Y, DEFAULT_ACCEL_HZ2);
+    EEPROM.put(EE_ADDR_SPEED_MAGIC, NVS_MOTION_MAGIC);
+    Serial.println(F("EEPROM: initialised motion block (800 steps/s, 25600 steps/s² per axis)."));
+}
+
+static uint32_t nvsLoadSpeed(int ee_addr) {
+    uint32_t v = DEFAULT_SPEED_HZ;
+    EEPROM.get(ee_addr, v);
+    if (v < 1 || v > 200000) v = DEFAULT_SPEED_HZ;   // FlexPwmStepper::setSpeed range
+    return v;
+}
+
+static uint32_t nvsLoadAccel(int ee_addr) {
+    uint32_t v = DEFAULT_ACCEL_HZ2;
+    EEPROM.get(ee_addr, v);
+    if (v < 1 || v > 10000000UL) v = DEFAULT_ACCEL_HZ2;
+    return v;
+}
+
+// Persist the axis' current speed + accel so they become the boot-time
+// defaults. Shared by the 'W' serial key and GET /api/save_speed.
+static void saveSpeed(Axis& a) {
+    const uint32_t v = (uint32_t)a.currentSpeed;
+    const uint32_t acc = (uint32_t)a.currentAccel;
+    EEPROM.put(a.ee_speed_addr, v);
+    EEPROM.put(a.ee_accel_addr, acc);
+    a.savedSpeed = (float)v;
+    a.savedAccel = (float)acc;
+    Serial.print(F("[")); Serial.print(a.name);
+    Serial.print(F("] saved to EEPROM: speed ")); Serial.print(v);
+    Serial.print(F(" steps/s, accel ")); Serial.print(acc);
+    Serial.println(F(" steps/s² (restored at boot)"));
+}
+
 // ── Per-axis helpers ────────────────────────────────────────────────────
 
 // Most external stepper drivers (TMC2209 ENN, DM542 ENA-) are active-LOW:
@@ -302,6 +407,65 @@ static void savePositionIfChanged(Axis& a, bool quiet = false) {
 
 // Forward decl — body lives with the other homing helpers below.
 static void cancelHoming(Axis& a);
+// Forward decl — rotate-N job progress, defined next to the JSON writer.
+static void revJobProgress(const Axis &a, float &done, float &left,
+                           const char *&dir, const char *&state);
+
+// Forget the current rotate-N job (UI progress). Called by every motion
+// verb that is not itself a rotate-N, so a stale job never shows against
+// unrelated motion.
+static void clearRevJob(Axis& a) {
+    a.revJobRevs = 0;
+    a.rampActive = false;   // a different motion is about to start — drop any ramp in flight
+}
+
+// Start a bounded move with a trapezoidal speed profile. Pulses begin at
+// RAMP_MIN_SPEED (or the speed setting if lower); serviceRamp() then walks
+// the FlexPWM rate up at currentAccel steps/s² to currentSpeed and back
+// down so the final pulses land near RAMP_MIN_SPEED. The end position is
+// unaffected: the reload ISR still stops the train on the counted step.
+static void startRampedMove(Axis& a, long target) {
+    const float vmin = (a.currentSpeed < RAMP_MIN_SPEED) ? a.currentSpeed : RAMP_MIN_SPEED;
+    a.rampSpeed  = vmin;
+    a.rampLastUs = micros();
+    a.rampActive = true;
+    a.stepper.setSpeed((uint32_t)vmin);
+    a.stepper.moveTo(target);
+}
+
+// Main-loop paced (RAMP_TICK_US). Decel starts when the remaining distance
+// equals the stopping distance from the current rate (plus one tick of
+// travel so a late tick errs towards decelerating early, never late).
+static void serviceRamp(Axis& a) {
+    if (!a.rampActive) return;
+    if (!a.stepper.isRunning()) {
+        a.rampActive = false;
+        a.stepper.setSpeed((uint32_t)a.currentSpeed);   // leave the cruise rate armed for jog/continuous
+        return;
+    }
+    const unsigned long now = micros();
+    const unsigned long el  = now - a.rampLastUs;
+    if (el < RAMP_TICK_US) return;
+    a.rampLastUs = now;
+
+    const float dt      = (float)el * 1e-6f;
+    const float acc     = (a.currentAccel > 1.0f) ? a.currentAccel : 1.0f;
+    const float vtarget = a.currentSpeed;
+    const float vmin    = (vtarget < RAMP_MIN_SPEED) ? vtarget : RAMP_MIN_SPEED;
+    const float remain  = (float)labs(a.stepper.distanceToGo());
+    float v = a.rampSpeed;
+
+    const float stopDist = (v * v - vmin * vmin) / (2.0f * acc);
+    if (remain <= stopDist + v * dt) {
+        v -= acc * dt; if (v < vmin) v = vmin;               // decelerate
+    } else if (v < vtarget) {
+        v += acc * dt; if (v > vtarget) v = vtarget;         // accelerate
+    } else if (v > vtarget) {
+        v = vtarget;                                         // operator lowered speed mid-move
+    }
+    if ((uint32_t)v != (uint32_t)a.rampSpeed) a.stepper.setSpeed((uint32_t)v);
+    a.rampSpeed = v;
+}
 
 static void moveRevolutions(Axis& a, int n, int dir) {
     if (!motorEnabled) {
@@ -311,10 +475,13 @@ static void moveRevolutions(Axis& a, int n, int dir) {
     cancelHoming(a);
     ensureDriverReady(a);
     long target = a.stepper.position() + (long)dir * n * STEPS_PER_REV;
+    a.revJobRevs      = n;
+    a.revJobDir       = dir > 0 ? +1 : -1;
+    a.revJobStartPos  = a.stepper.position();
+    a.revJobTargetPos = target;
     Serial.print(F("[")); Serial.print(a.name);
-    Serial.print(F("] moving to ")); Serial.print(target); Serial.println(F(" steps …"));
-    a.stepper.setSpeed((uint32_t)a.currentSpeed);
-    a.stepper.moveTo(target);
+    Serial.print(F("] moving to ")); Serial.print(target); Serial.println(F(" steps … (ramped)"));
+    startRampedMove(a, target);
 }
 
 // Non-blocking: kick off a homing move to 0 and return immediately.
@@ -332,9 +499,9 @@ static void startHomeOnBoot(Axis& a) {
     Serial.print(F("[")); Serial.print(a.name);
     Serial.print(F("] homing: driving from "));
     Serial.print(saved); Serial.println(F(" steps → 0 …"));
+    clearRevJob(a);
     ensureDriverReady(a);
-    a.stepper.setSpeed((uint32_t)a.currentSpeed);
-    a.stepper.moveTo(0);
+    startRampedMove(a, 0);
     a.homing = true;
 }
 
@@ -369,6 +536,7 @@ static void pollLimits() {
 // ── Per-axis service (call once per loop) ───────────────────────────────
 
 static void serviceAxis(Axis& a) {
+    serviceRamp(a);
     // No more stepper.run() / runSpeed() calls — FlexPWM generates
     // pulses autonomously and the reload ISR keeps position() current.
     // serviceAxis is now just observability: rev counter, throttled
@@ -428,13 +596,26 @@ static void printStatus() {
         Axis& a = *axes[i];
         Serial.print(F("[")); Serial.print(a.name); Serial.println(F("]"));
         Serial.print(F("  position    : ")); Serial.print(a.stepper.position()); Serial.println(F(" steps"));
-        Serial.print(F("  speed       : ")); Serial.print(a.currentSpeed, 0); Serial.println(F(" steps/s"));
-        Serial.print(F("  accel       : ")); Serial.print(a.currentAccel, 0); Serial.println(F(" steps/s²"));
+        Serial.print(F("  speed       : ")); Serial.print(a.currentSpeed, 0);
+        Serial.print(F(" steps/s (saved ")); Serial.print(a.savedSpeed, 0); Serial.println(F(")"));
+        Serial.print(F("  accel       : ")); Serial.print(a.currentAccel, 0);
+        Serial.print(F(" steps/s² (saved ")); Serial.print(a.savedAccel, 0); Serial.println(F(")"));
         Serial.print(F("  continuous  : "));
         if (a.continuousMode) Serial.println(a.continuousDir > 0 ? F("CW") : F("CCW"));
         else                  Serial.println(F("OFF"));
         Serial.print(F("  limit input : "));
         Serial.println(a.limitLastState == LOW ? F("ASSERTED (LOW)") : F("released (HIGH)"));
+        Serial.print(F("  rotate job  : "));
+        if (a.revJobRevs > 0) {
+            float jdone, jleft; const char *jdir, *jstate;
+            revJobProgress(a, jdone, jleft, jdir, jstate);
+            Serial.print(jdone, 2); Serial.print(F(" / ")); Serial.print(a.revJobRevs);
+            Serial.print(F(" revs ")); Serial.print(jdir);
+            Serial.print(F(", ")); Serial.print(jleft, 2); Serial.print(F(" left ("));
+            Serial.print(jstate); Serial.println(F(")"));
+        } else {
+            Serial.println(F("none"));
+        }
     }
     Serial.println(F("──────────────────────────────────"));
 }
@@ -451,6 +632,7 @@ static void printMenu() {
     Serial.println(F("  9      Stop (decelerate)"));
     Serial.println(F("  0      EMERGENCY STOP (immediate)"));
     Serial.println(F("  S / A  Set speed / acceleration"));
+    Serial.println(F("  W      Save current speed + accel to EEPROM (restored at boot)"));
     Serial.println(F("  T      Toggle ENA pin (test driver polarity)"));
     Serial.println(F("  Z      Set position = home (0), save to EEPROM"));
     Serial.println(F("  E / D  Enable / disable all motors"));
@@ -565,7 +747,7 @@ button.danger{background:#502020;border-color:#933}
 button.danger:hover{background:#702828}
 button.go{background:#1c3a1c;border-color:#494}
 button.go:hover{background:#264826}
-input[type=number]{background:#222;color:#eee;border:1px solid #555;padding:.4em;border-radius:4px;width:4.5em;font-family:inherit}
+input[type=number]{background:#222;color:#eee;border:1px solid #555;padding:.4em;border-radius:4px;width:7em;font-size:1em;font-family:inherit}
 .kv{font-size:.85em;color:#aaa}
 .kv b{color:#eee}
 .la{color:#f44;font-weight:bold}
@@ -573,6 +755,11 @@ input[type=number]{background:#222;color:#eee;border:1px solid #555;padding:.4em
 .sep{color:#555;margin:0 .4em}
 .hom{display:none;color:#000;background:#fc3;padding:.1em .55em;border-radius:.4em;font-size:.7em;margin-left:.5em;vertical-align:middle;font-weight:bold;animation:pulse 1s ease-in-out infinite}
 .hom.on{display:inline-block}
+.job{margin:.35em 0 .5em}
+.bar{height:8px;background:#222;border:1px solid #444;border-radius:4px;margin-top:.3em;overflow:hidden}
+.fill{height:100%;width:0;background:#48c;transition:width .6s linear}
+.fill.done{background:#4f4}
+.fill.stopped{background:#c93}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.55}}
 </style></head>
 <body>
@@ -590,6 +777,18 @@ input[type=number]{background:#222;color:#eee;border:1px solid #555;padding:.4em
 
 <script>
 async function cmd(u){try{await fetch(u);await poll();}catch(e){}}
+function setSpd(ax){const el=document.getElementById('s-'+ax);if(el.value==='')return;cmd('/api/speed?axis='+ax+'&v='+el.value);}
+function setAcc(ax){const el=document.getElementById('a-'+ax);if(el.value==='')return;cmd('/api/accel?axis='+ax+'&v='+el.value);}
+// Refresh a numeric field from the poll ONLY if the operator has not edited
+// it. Without this, clicking Set blurs the field and a poll landing between
+// mouse-down and mouse-up overwrites the typed value with the live one.
+function syncField(el,v){
+  if(document.activeElement===el)return;
+  const live=String(v);
+  if(el.value===live){el.dataset.auto=live;return;}      // in sync — remember it
+  if(el.value===''||el.value===el.dataset.auto){el.value=live;el.dataset.auto=live;} // untouched — follow live
+  // otherwise: operator-edited, leave it alone until they Set it
+}
 async function poll(){
   try{
     const r=await fetch('/api/status');
@@ -612,7 +811,8 @@ function render(s){
       d.className='axis';d.id='ax-'+a.name;
       d.innerHTML=`
 <h2><span class="axname">${a.name}</span> axis <span class="sel"></span><span class="hom">HOMING</span></h2>
-<div class="kv">pos <b class="pos">?</b> steps <span class="sep">·</span> spd <b class="spd">?</b> <span class="sep">·</span> accel <b class="acc">?</b> <span class="sep">·</span> cont <b class="con">?</b> <span class="sep">·</span> limit <span class="lim">?</span></div>
+<div class="kv">pos <b class="pos">?</b> steps <span class="sep">·</span> spd <b class="spd">?</b> live <b class="lsp">?</b> <span class="sep">·</span> accel <b class="acc">?</b> <span class="sep">·</span> cont <b class="con">?</b> <span class="sep">·</span> limit <span class="lim">?</span></div>
+<div class="kv job">rotate job <b class="jreq">none</b> <span class="jinfo"></span><div class="bar"><div class="fill"></div></div></div>
 <div class="row">
   <button onclick="cmd('/api/select?axis=${a.name}')">Select</button>
   <button onclick="cmd('/api/jog?axis=${a.name}&dir=cw')">Jog +100</button>
@@ -629,11 +829,12 @@ function render(s){
   <button onclick="cmd('/api/continuous?axis=${a.name}&dir=stop')">Stop cont</button>
   <button onclick="cmd('/api/stop?axis=${a.name}')">Stop (decel)</button>
   <button class="danger" onclick="cmd('/api/estop?axis=${a.name}')">E-STOP</button>
-  <button onclick="cmd('/api/zero?axis=${a.name}')">Zero (home)</button>
+  <button onclick="cmd('/api/zero?axis=${a.name}')">Set current pos as home</button>
 </div>
 <div class="row">
-  spd <input type="number" id="s-${a.name}" min="1" step="50"> <button onclick="cmd('/api/speed?axis=${a.name}&v='+document.getElementById('s-${a.name}').value)">Set</button>
-  acc <input type="number" id="a-${a.name}" min="1" step="50"> <button onclick="cmd('/api/accel?axis=${a.name}&v='+document.getElementById('a-${a.name}').value)">Set</button>
+  spd <input type="number" id="s-${a.name}" min="1" max="200000" step="50" onkeydown="if(event.key==='Enter')setSpd('${a.name}')"> <button onclick="setSpd('${a.name}')">Set</button>
+  <button onclick="cmd('/api/save_speed?axis=${a.name}')">Save spd+acc</button> <span class="kv">saved <b class="ssp">?</b></span>
+  acc <input type="number" id="a-${a.name}" min="1" step="50" onkeydown="if(event.key==='Enter')setAcc('${a.name}')"> <button onclick="setAcc('${a.name}')">Set</button>
 </div>`;
       root.appendChild(d);
     }
@@ -646,15 +847,27 @@ function render(s){
     d.querySelector('.hom').classList.toggle('on',!!a.homing);
     d.querySelector('.pos').textContent=a.position;
     d.querySelector('.spd').textContent=a.speed;
+    d.querySelector('.lsp').textContent=a.live_speed;
+    const ssp=d.querySelector('.ssp'); ssp.textContent=a.saved_speed+' / '+a.saved_accel;
+    ssp.style.color=(a.saved_speed==a.speed&&a.saved_accel==a.accel)?'#4f4':'#fc3';
     d.querySelector('.acc').textContent=a.accel;
     d.querySelector('.con').textContent=a.continuous;
     const lim=d.querySelector('.lim');
     lim.textContent=a.limit;
     lim.className='lim '+(a.limit==='ASSERTED'?'la':'lr');
+    const j=a.rev_job||{revs:0};
+    const jr=d.querySelector('.jreq'),ji=d.querySelector('.jinfo'),jf=d.querySelector('.fill');
+    if(j.revs>0){
+      jr.textContent=j.done.toFixed(2)+' / '+j.revs+' revs '+j.dir;
+      ji.textContent=j.state==='running'?'· '+j.left.toFixed(2)+' to go'
+                    :j.state==='done'?'· complete':'· stopped, '+j.left.toFixed(2)+' left';
+      jf.style.width=Math.min(100,100*j.done/j.revs)+'%';
+      jf.className='fill '+j.state;
+    }else{jr.textContent='none';ji.textContent='';jf.style.width='0';jf.className='fill';}
     const si=document.getElementById('s-'+a.name);
     const ai=document.getElementById('a-'+a.name);
-    if(document.activeElement!==si)si.value=a.speed;
-    if(document.activeElement!==ai)ai.value=a.accel;
+    syncField(si,a.speed);
+    syncField(ai,a.accel);
   }
 }
 // 1000 ms — every HTTP round-trip blocks the main loop for a few ms
@@ -754,8 +967,25 @@ static void httpServeIndex(EthernetClient &c) {
     writeAll(c, reinterpret_cast<const uint8_t *>(INDEX_HTML), n);
 }
 
+// Rotate-N job progress for one axis. done/left in revolutions (float);
+// state: none | running | done | stopped.
+static void revJobProgress(const Axis &a, float &done, float &left,
+                           const char *&dir, const char *&state) {
+    done = 0.0f; left = 0.0f; dir = "-"; state = "none";
+    if (a.revJobRevs <= 0) return;
+    const long pos   = a.stepper.position();
+    long moved = labs(pos - a.revJobStartPos);
+    const long total = labs(a.revJobTargetPos - a.revJobStartPos);
+    if (moved > total) moved = total;
+    done  = (float)moved / (float)STEPS_PER_REV;
+    left  = (float)(total - moved) / (float)STEPS_PER_REV;
+    dir   = a.revJobDir > 0 ? "CW" : "CCW";
+    state = a.stepper.isRunning() ? "running"
+          : (pos == a.revJobTargetPos ? "done" : "stopped");
+}
+
 static void httpServeStatusJson(EthernetClient &c) {
-    char json[640];
+    char json[1024];
     const IPAddress ip = Ethernet.localIP();
     int n = snprintf(json, sizeof(json),
         "{\"net\":{\"backend\":\"%s\",\"link\":\"%s\",\"ip\":\"%u.%u.%u.%u\"},"
@@ -769,13 +999,18 @@ static void httpServeStatusJson(EthernetClient &c) {
         const Axis &a = *axes[i];
         const char *cont = a.continuousMode ? (a.continuousDir > 0 ? "CW" : "CCW") : "OFF";
         const char *lim  = a.limitLastState == LOW ? "ASSERTED" : "released";
+        float jdone, jleft; const char *jdir, *jstate;
+        revJobProgress(a, jdone, jleft, jdir, jstate);
         n += snprintf(json + n, sizeof(json) - n,
-            "%s{\"name\":\"%s\",\"position\":%ld,\"speed\":%.0f,\"accel\":%.0f,"
-            "\"continuous\":\"%s\",\"limit\":\"%s\",\"selected\":%s,\"homing\":%s}",
+            "%s{\"name\":\"%s\",\"position\":%ld,\"speed\":%.0f,\"accel\":%.0f,\"saved_speed\":%.0f,\"saved_accel\":%.0f,\"live_speed\":%lu,"
+            "\"continuous\":\"%s\",\"limit\":\"%s\",\"selected\":%s,\"homing\":%s,"
+            "\"rev_job\":{\"revs\":%d,\"dir\":\"%s\",\"done\":%.2f,\"left\":%.2f,\"state\":\"%s\"}}",
             i > 0 ? "," : "",
-            a.name, a.stepper.position(), a.currentSpeed, a.currentAccel,
+            a.name, a.stepper.position(), a.currentSpeed, a.currentAccel, a.savedSpeed,
+            a.savedAccel, (unsigned long)a.stepper.speed(),
             cont, lim, (&a == selected) ? "true" : "false",
-            a.homing ? "true" : "false");
+            a.homing ? "true" : "false",
+            a.revJobRevs, jdir, (double)jdone, (double)jleft, jstate);
     }
     n += snprintf(json + n, sizeof(json) - n, "]}");
     httpSendHeader(c, 200, "OK", "application/json", n);
@@ -789,6 +1024,7 @@ static void httpServeStatusJson(EthernetClient &c) {
 static bool webJog(Axis &a, int dir) {
     if (!motorEnabled) return false;
     cancelHoming(a);
+    clearRevJob(a);
     ensureDriverReady(a);
     a.continuousMode = false;
     a.stepper.setSpeed((uint32_t)a.currentSpeed);
@@ -807,6 +1043,7 @@ static bool webContinuous(Axis &a, int dir) {
     }
     if (!motorEnabled) return false;
     cancelHoming(a);
+    clearRevJob(a);
     ensureDriverReady(a);
     a.continuousMode  = true;
     a.continuousDir   = dir > 0 ? +1 : -1;
@@ -895,9 +1132,17 @@ static void httpDispatch(EthernetClient &c, const char *path, const char *query)
         Axis *a = getParam(query, "axis", axisName, sizeof(axisName)) ? findAxis(axisName) : nullptr;
         if (!a) { httpSendText(c, 400, "Bad Request", "bad axis\n"); return; }
         cancelHoming(*a);
+        clearRevJob(*a);
         a->stepper.setPosition(0);
         savePositionIfChanged(*a);
         httpSendText(c, 200, "OK", "zeroed\n"); return;
+    }
+
+    if (strcmp(path, "/api/save_speed") == 0) {
+        Axis *a = getParam(query, "axis", axisName, sizeof(axisName)) ? findAxis(axisName) : nullptr;
+        if (!a) { httpSendText(c, 400, "Bad Request", "bad axis\n"); return; }
+        saveSpeed(*a);
+        httpSendText(c, 200, "OK", "speed saved\n"); return;
     }
 
     if (strcmp(path, "/api/speed") == 0) {
@@ -905,8 +1150,9 @@ static void httpDispatch(EthernetClient &c, const char *path, const char *query)
         getParam(query, "v", valStr, sizeof(valStr));
         float v = strtof(valStr, nullptr);
         if (!a || v <= 0) { httpSendText(c, 400, "Bad Request", "bad args\n"); return; }
+        if (v > 200000.0f) v = 200000.0f;   // FlexPwmStepper::setSpeed ceiling — keep status honest
         a->currentSpeed = v;
-        a->stepper.setSpeed((uint32_t)v);
+        if (!a->rampActive) a->stepper.setSpeed((uint32_t)v);   // mid-ramp: serviceRamp converges instead
         httpSendText(c, 200, "OK", "speed\n"); return;
     }
 
@@ -1022,6 +1268,7 @@ void setup() {
     delay(500);   // Teensy 4.1 USB CDC: let the host enumerate
 
     nvsInit();
+    nvsInitSpeed();
     idleAutoRelease = nvsLoadRelease();
 
     for (int i = 0; i < NUM_AXES; i++) {
@@ -1034,6 +1281,10 @@ void setup() {
         // fixed at 50% duty by FlexPWM (no setMinPulseWidth needed);
         // acceleration is not supported (constant velocity).
         a.stepper.init();
+        a.currentSpeed = (float)nvsLoadSpeed(a.ee_speed_addr);
+        a.currentAccel = (float)nvsLoadAccel(a.ee_accel_addr);
+        a.savedSpeed   = a.currentSpeed;
+        a.savedAccel   = a.currentAccel;
         a.stepper.setSpeed((uint32_t)a.currentSpeed);
 
         long savedPos = nvsLoadPosition(a.ee_pos_addr);
@@ -1053,6 +1304,12 @@ void setup() {
     Serial.print(F("  EN="));    Serial.print(PIN_Y_EN);
     Serial.print(F("  LIMIT=")); Serial.println(PIN_Y_LIMIT);
     Serial.print(F("Steps/rev: ")); Serial.println(STEPS_PER_REV);
+    Serial.print(F("Speed (EEPROM): X=")); Serial.print(xAxis.currentSpeed, 0);
+    Serial.print(F("  Y="));              Serial.print(yAxis.currentSpeed, 0);
+    Serial.println(F(" steps/s"));
+    Serial.print(F("Accel (EEPROM): X=")); Serial.print(xAxis.currentAccel, 0);
+    Serial.print(F("  Y="));              Serial.print(yAxis.currentAccel, 0);
+    Serial.println(F(" steps/s²"));
     Serial.print(F("Idle auto-release: "));
     Serial.println(idleAutoRelease ? F("ON  (silent at rest)") : F("OFF (motor holds with current)"));
 
@@ -1122,6 +1379,7 @@ void loop() {
         if (!motorEnabled) { Serial.println(F("Motors disabled — enable first (E).")); break; }
         ensureDriverReady(a);
         Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] jog CW +100 steps"));
+        clearRevJob(a);
         a.stepper.setSpeed((uint32_t)a.currentSpeed);
         a.stepper.moveSteps(100);   // non-blocking; ISR counts down to target
         a.lastMotionMs = millis();
@@ -1133,6 +1391,7 @@ void loop() {
         if (!motorEnabled) { Serial.println(F("Motors disabled — enable first (E).")); break; }
         ensureDriverReady(a);
         Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] jog CCW -100 steps"));
+        clearRevJob(a);
         a.stepper.setSpeed((uint32_t)a.currentSpeed);
         a.stepper.moveSteps(-100);
         a.lastMotionMs = millis();
@@ -1145,6 +1404,7 @@ void loop() {
             Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] continuous CW stopped."));
         } else {
             cancelHoming(a);
+            clearRevJob(a);
             ensureDriverReady(a);
             a.continuousMode  = true;
             a.continuousDir   = +1;
@@ -1162,6 +1422,7 @@ void loop() {
             Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] continuous CCW stopped."));
         } else {
             cancelHoming(a);
+            clearRevJob(a);
             ensureDriverReady(a);
             a.continuousMode  = true;
             a.continuousDir   = -1;
@@ -1190,8 +1451,9 @@ void loop() {
     case 'S': case 's': {
         float spd = readFloatFromSerial();
         if (spd > 0) {
+            if (spd > 200000.0f) spd = 200000.0f;   // FlexPwmStepper ceiling
             a.currentSpeed = spd;
-            a.stepper.setSpeed((uint32_t)a.currentSpeed);
+            if (!a.rampActive) a.stepper.setSpeed((uint32_t)a.currentSpeed);
             Serial.print(F("[")); Serial.print(a.name);
             Serial.print(F("] speed = ")); Serial.print(a.currentSpeed, 0); Serial.println(F(" steps/s"));
         }
@@ -1201,13 +1463,13 @@ void loop() {
         float acc = readFloatFromSerial();
         if (acc > 0) {
             a.currentAccel = acc;
-            // accel is a no-op under FlexPwmStepper (constant velocity);
-            // value is stored for display only.
+            // used by the trapezoidal ramp on rotate-N / homing moves
             Serial.print(F("[")); Serial.print(a.name);
             Serial.print(F("] accel = ")); Serial.print(a.currentAccel, 0); Serial.println(F(" steps/s²"));
         }
         break;
     }
+    case 'W': case 'w': saveSpeed(a); break;
     case 'E': case 'e': enableAll(true);  break;
     case 'D': case 'd': enableAll(false); break;
     case 'T': case 't': {
@@ -1229,6 +1491,7 @@ void loop() {
         break;
     case 'Z': case 'z':
         cancelHoming(a);
+        clearRevJob(a);
         a.stepper.setPosition(0);
         savePositionIfChanged(a);
         Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] position zeroed (declared home)."));
