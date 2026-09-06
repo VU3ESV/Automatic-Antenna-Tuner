@@ -13,7 +13,7 @@
 // (motor_teensy41.cpp, relay_teensy41.cpp, limits_teensy41.cpp) translate
 // the axis index to these constants.
 //
-// The bench-test sketch firmware/t41-stepper-test/ also consumes this
+// The bench rig firmware/test/t41-stepper-test/ also consumes this
 // header (via -I in its platformio.ini) so bench and production
 // firmware share a single source of truth for the carrier wiring.
 //

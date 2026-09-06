@@ -211,7 +211,7 @@ End-to-end: Teensy → master → browser shows real controller state.
       Hi-Z / Lo-Z toggle (auto-highlighted from `state.side`), bypass
       engage/release, re-home button, fake-Fwd-W injector, last-ack
       readout. Two-client smoke deferred to bench validation.
-- [x] **Bench software travel window** (`firmware/t41-stepper-test`,
+- [x] **Bench software travel window** (`firmware/test/t41-stepper-test`,
       2026-09-06): each bench axis declares the element it drives —
       roller inductor, vacuum-variable capacitor, variable capacitor
       with or without end stops, variometer — and, for elements with

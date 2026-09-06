@@ -2,7 +2,7 @@
 
 Standalone bring-up project. **Run this first** on any new Teensy +
 Ethernet kit, before flashing the production firmware in
-[`../tuner-controller/`](../tuner-controller/). Once it passes, you
+[`../../tuner-controller/`](../../tuner-controller/). Once it passes, you
 know the hardware platform is good; if it doesn't, you know the
 problem is hardware, not firmware logic.
 
@@ -46,8 +46,9 @@ Teensy 4.1 Ethernet libraries, selected by the PlatformIO environment:
 
 Same `src/main.cpp` for both; the difference is one `#define` and one
 `lib_deps` entry in [`platformio.ini`](platformio.ini). The abstraction
-layer that makes this work is in `src/net_hal.{h,_qnethernet.cpp,_nativeethernet.cpp}`.
-See [`../../docs/ARCHITECTURE.md`](../../docs/ARCHITECTURE.md) §5.1.2
+layer that makes this work is the shared library
+[`../../lib/net_hal/`](../../lib/net_hal/) (`net_hal.h` + one `.cpp` per backend).
+See [`../../../docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) §5.1.2
 for the trade-off discussion.
 
 ## Flashing
@@ -140,7 +141,7 @@ Each request bumps the `requests` counter in the serial heartbeat.
 - [ ] Heartbeat line every 10 s in the serial monitor.
 
 If all six pass, the hardware platform is good and you can move on to
-the production firmware bring-up in [`../tuner-controller/`](../tuner-controller/).
+the production firmware bring-up in [`../../tuner-controller/`](../../tuner-controller/).
 
 ## Troubleshooting
 
@@ -161,4 +162,4 @@ This is a *bring-up* project. It is **not** the production tuner
 firmware. It has no protocol, no relay control, no motor control, and
 no safety lockouts. Do not connect it to actual tuner hardware. Once
 the selftest passes, delete this directory or leave it as a reference
-— production work happens in [`../tuner-controller/`](../tuner-controller/).
+— production work happens in [`../../tuner-controller/`](../../tuner-controller/).

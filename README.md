@@ -49,9 +49,10 @@ verbs only.
   proposal, gated on Phase 1 commissioning.)*
 - **[docs/DEV-SETUP.md](docs/DEV-SETUP.md)** — VS Code dev environment
   for both firmware (PlatformIO/Teensy) and master (Go/Pi).
-- **[firmware/teensy-selftest/](firmware/teensy-selftest/)** —
-  standalone bring-up project. Run this first on a new Teensy + Ethernet
-  kit to verify the hardware platform before flashing production firmware.
+- **[firmware/test/](firmware/test/)** — standalone bench and bring-up
+  projects (Teensy + Ethernet selftest, stepper rigs). Run the selftest
+  first on a new Teensy + Ethernet kit to verify the hardware platform
+  before flashing the production firmware in `firmware/tuner-controller/`.
 
 ## Status
 

@@ -29,7 +29,7 @@ Each axis drives a JMC iHSS60 integrated closed-loop stepper (STEP / DIR / EN in
 
 **ENA polarity:** active-LOW on most external drivers (LOW = driver
 enabled, coils energised). Confirm with the `T` command in
-`firmware/t41-stepper-test/` before flipping a high-current axis.
+`firmware/test/t41-stepper-test/` before flipping a high-current axis.
 
 **STEP-pin PWM column:** verified against `framework-arduinoteensy/
 cores/teensy4/pwm.c`. Pins 2 / 4 / 6 / 8 each map to a distinct

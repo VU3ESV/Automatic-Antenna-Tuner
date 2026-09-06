@@ -96,12 +96,12 @@ jobs:
           path: |
             ~/.platformio/packages
             ~/.platformio/platforms
-          key: ${{ runner.os }}-pio-selftest-${{ matrix.env }}-${{ hashFiles('firmware/teensy-selftest/platformio.ini') }}
+          key: ${{ runner.os }}-pio-selftest-${{ matrix.env }}-${{ hashFiles('firmware/test/teensy-selftest/platformio.ini') }}
           restore-keys: |
             ${{ runner.os }}-pio-selftest-${{ matrix.env }}-
             ${{ runner.os }}-pio-
       - name: Install PlatformIO
         run: pip install --upgrade platformio
       - name: Build ${{ matrix.env }}
-        working-directory: firmware/teensy-selftest
+        working-directory: firmware/test/teensy-selftest
         run: pio run -e ${{ matrix.env }}

@@ -41,7 +41,9 @@ Automatic-Antenna-Tuner/
 │   ├── HW-T41-CARRIER.md # plan: grblHAL-teensy 4.x V2.09 board as the carrier
 │   └── HW-T41-PINMAP.md  # Teensy 4.1 pin → V2.09 carrier net mapping (reference)
 ├── firmware/
-│   └── tuner-controller/  # MCU firmware (C/C++ on Teensy 4.1 or STM32H7)
+│   ├── tuner-controller/  # MCU firmware (C/C++ on Teensy 4.1 or STM32H7); unit tests in test/
+│   ├── lib/               # shared PlatformIO libraries (net_hal, flexpwm_stepper)
+│   └── test/              # standalone bench / bring-up projects (selftest, stepper rigs)
 └── master/
     └── tuner-master/      # Go server + embedded web UI, runs on the Pi
 ```

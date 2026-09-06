@@ -329,7 +329,7 @@ because:
 
 ##### Where the choice lives in code
 
-A small abstraction in `firmware/.../src/net_hal.h` exposes the *only*
+A small shared PlatformIO library, `firmware/lib/net_hal/`, exposes the *only*
 Ethernet operations the firmware uses — `begin`, `wait_link`,
 `wait_dhcp`, `link_state`, `link_speed_mbps`, `link_full_duplex`,
 `hw_mac`, `lib_name` — plus a typedef so callers see
@@ -337,11 +337,15 @@ Ethernet operations the firmware uses — `begin`, `wait_link`,
 Two implementation files under `#ifdef` guards:
 
 ```
-firmware/teensy-selftest/src/
+firmware/lib/net_hal/src/
 ├── net_hal.h                       # interface; backend selected by build flag
 ├── net_hal_qnethernet.cpp          # active iff TUNER_NET_QNETHERNET
-├── net_hal_nativeethernet.cpp      # active iff TUNER_NET_NATIVEETHERNET
-└── main.cpp                        # calls net_hal::*; backend-agnostic
+└── net_hal_nativeethernet.cpp      # active iff TUNER_NET_NATIVEETHERNET
+
+Consumers (each adds the library via lib_extra_dirs + lib_deps):
+firmware/tuner-controller/          # production controller
+firmware/test/teensy-selftest/      # Ethernet bring-up selftest
+firmware/test/t41-stepper-test/     # stepper bench rig
 ```
 
 `platformio.ini` selects via build flag + `lib_deps`. The CI build
