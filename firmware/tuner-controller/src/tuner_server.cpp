@@ -17,10 +17,10 @@ EthernetServer server(kListenPort);
 struct Connection {
     EthernetClient client;
     bool           in_use;
-    // Inbound line buffer. Cleared on each '\n'.
-    char           rx_buf[512];
+    // Inbound line buffer. Cleared on each '\n'. Large enough for a
+    // three-element set_topology frame.
+    char           rx_buf[768];
     size_t         rx_len;
-    // Whether we've sent the warm-start state frame on this connection yet.
     bool           sent_initial_state;
 };
 
@@ -28,8 +28,8 @@ Connection conns[kMaxClients];
 
 app::Snapshot   published;
 app::Snapshot   last_sent;
-bool            published_dirty = false;
-uint32_t        seq             = 0;
+bool            published_dirty   = false;
+uint32_t        seq               = 0;
 unsigned long   last_heartbeat_ms = 0;
 
 uint32_t next_seq() {
@@ -38,136 +38,202 @@ uint32_t next_seq() {
     return seq;
 }
 
-// Write a complete JSON frame + '\n' to one client. Returns true on
-// success. Drops the frame silently if the underlying socket would
-// block; the slow-client drop is intentional per PROTOCOL.md §5.
+// Write a complete JSON frame + '\n' to one client. Drops the frame
+// silently if the socket would block; the slow-client drop is
+// intentional per PROTOCOL.md §5. Chunked below the NativeEthernet
+// socket-buffer ceiling (see http_server.cpp for the rationale).
 bool send_frame(EthernetClient &c, const char *frame, int n) {
-    if (!c.connected()) return false;
-    if (n <= 0) return false;
-    c.write(reinterpret_cast<const uint8_t *>(frame), n);
+    if (!c.connected() || n <= 0) return false;
+    constexpr int kChunk = 1024;
+    int sent = 0;
+    while (sent < n) {
+        const int want = (n - sent) > kChunk ? kChunk : (n - sent);
+        const size_t w = c.write(reinterpret_cast<const uint8_t *>(frame + sent), want);
+        if (w == 0) return false;
+        sent += static_cast<int>(w);
+        if (sent < n) c.flush();
+    }
     c.write('\n');
     return true;
 }
 
 void broadcast(const char *frame, int n) {
     for (auto &conn : conns) {
-        if (conn.in_use) {
-            send_frame(conn.client, frame, n);
-        }
+        if (conn.in_use) send_frame(conn.client, frame, n);
     }
 }
 
-// Send the current published snapshot as a `state` frame to one client.
 void send_state_to(EthernetClient &c) {
     char frame[app::kFrameBufferSize];
-    int n = app::serialize_state(frame, sizeof(frame), next_seq(), published);
+    const int n = app::serialize_state(frame, sizeof(frame), next_seq(), published);
     send_frame(c, frame, n);
 }
 
 void send_state_broadcast() {
     char frame[app::kFrameBufferSize];
-    int n = app::serialize_state(frame, sizeof(frame), next_seq(), published);
+    const int n = app::serialize_state(frame, sizeof(frame), next_seq(), published);
     broadcast(frame, n);
     last_sent = published;
 }
 
 void send_heartbeat_broadcast() {
     char frame[128];
-    int n = app::serialize_heartbeat(frame, sizeof(frame), next_seq());
+    const int n = app::serialize_heartbeat(frame, sizeof(frame), next_seq());
     broadcast(frame, n);
 }
 
-// Reply ok/err to a single command.
 void send_ack_ok(EthernetClient &c, const char *id) {
     char ack[128];
-    int  n = app::serialize_ack_ok(ack, sizeof(ack), id);
+    const int n = app::serialize_ack_ok(ack, sizeof(ack), id);
     send_frame(c, ack, n);
 }
 
-void send_ack_err(EthernetClient &c, const char *id,
-                  const char *code, const char *msg) {
+void send_ack_err(EthernetClient &c, const char *id, const char *code, const char *msg) {
     char ack[256];
-    int  n = app::serialize_ack_err(ack, sizeof(ack), id, code, msg);
+    const int n = app::serialize_ack_err(ack, sizeof(ack), id, code, msg);
     send_frame(c, ack, n);
 }
 
-// Dispatch a single parsed command. Motion/relay/safety verbs route
-// through app::motion which enforces invariant #1 (no motion under RF).
-void dispatch(Connection &conn, const char *line, size_t line_len,
-              const app::InboundCommand &cmd) {
-    auto reply = [&](bool accepted, const app::motion::Refusal &err) {
-        if (accepted) send_ack_ok(conn.client, cmd.id);
-        else          send_ack_err(conn.client, cmd.id, err.code, err.msg);
+// Resolve an axis argument ("0".."2" or an element name) or send the
+// bad_axis ack. Returns -1 after replying.
+int resolve_or_reply(EthernetClient &c, const char *id, const char *axis_arg) {
+    const int a = app::motion::resolve_axis(axis_arg);
+    if (a < 0) send_ack_err(c, id, "bad_axis", "axis must be 0..2 or a bound element name");
+    return a;
+}
+
+// Dispatch a single parsed command. Every verb routes through
+// app::motion, which enforces the invariants; the protocol layer only
+// decodes arguments and maps results onto acks.
+void dispatch(Connection &conn, const char *line, size_t line_len, const app::InboundCommand &cmd) {
+    EthernetClient &c = conn.client;
+    app::motion::Refusal err = {nullptr, nullptr};
+    auto reply = [&](bool ok) {
+        if (ok) send_ack_ok(c, cmd.id);
+        else    send_ack_err(c, cmd.id, err.code ? err.code : "refused", err.msg ? err.msg : "");
     };
+    auto reply_move = [&](app::motion::MoveResult r) { reply(app::motion::accepted(r)); };
+    auto bad_args = [&](const char *what) { send_ack_err(c, cmd.id, "bad_args", what); };
 
-    if (strcmp(cmd.action, "noop") == 0) {
-        send_ack_ok(conn.client, cmd.id);
+    const char *act = cmd.action;
+    char axis[app::kAxisArgLen];
+
+    if (strcmp(act, "noop") == 0)   { send_ack_ok(c, cmd.id); return; }
+    if (strcmp(act, "resync") == 0) { send_ack_ok(c, cmd.id); send_state_to(c); return; }
+
+    if (strcmp(act, "move_l") == 0 || strcmp(act, "move_c") == 0) {
+        int32_t value = 0; bool is_delta = true;
+        if (!app::parse_args_move(line, line_len, value, is_delta)) return bad_args("expected delta_steps or target_steps");
+        reply(act[5] == 'l' ? app::motion::move_l(value, is_delta, err)
+                            : app::motion::move_c(value, is_delta, err));
         return;
     }
 
-    if (strcmp(cmd.action, "resync") == 0) {
-        send_ack_ok(conn.client, cmd.id);
-        send_state_to(conn.client);
+    if (strcmp(act, "move_axis") == 0) {
+        int32_t value = 0; bool is_delta = true;
+        if (!app::parse_args_move_axis(line, line_len, axis, value, is_delta)) return bad_args("expected axis + delta_steps|target_steps");
+        const int a = resolve_or_reply(c, cmd.id, axis);
+        if (a >= 0) reply_move(app::motion::move_axis(static_cast<uint8_t>(a), value, is_delta, err));
         return;
     }
 
-    if (strcmp(cmd.action, "move_l") == 0 || strcmp(cmd.action, "move_c") == 0) {
-        int32_t value    = 0;
-        bool    is_delta = true;
-        if (!app::parse_args_move(line, line_len, value, is_delta)) {
-            send_ack_err(conn.client, cmd.id, "bad_args",
-                         "expected delta_steps or target_steps");
+    if (strcmp(act, "run") == 0) {
+        int dir = 0;
+        if (!app::parse_args_run(line, line_len, axis, dir)) return bad_args("expected axis + dir: cw|ccw");
+        const int a = resolve_or_reply(c, cmd.id, axis);
+        if (a >= 0) reply_move(app::motion::run_to_end(static_cast<uint8_t>(a), dir, err));
+        return;
+    }
+
+    if (strcmp(act, "stop") == 0) {
+        if (!app::parse_args_axis(line, line_len, axis, /*required=*/false)) return bad_args("malformed args");
+        if (axis[0] == '\0') { app::motion::stop_all(); send_ack_ok(c, cmd.id); return; }
+        const int a = resolve_or_reply(c, cmd.id, axis);
+        if (a >= 0) reply(app::motion::stop_axis(static_cast<uint8_t>(a), err));
+        return;
+    }
+
+    if (strcmp(act, "estop") == 0 || strcmp(act, "estop_reset") == 0) {
+        const bool reset = act[5] == '_';
+        if (!app::parse_args_axis(line, line_len, axis, /*required=*/false)) return bad_args("malformed args");
+        if (axis[0] == '\0') {
+            if (reset) app::motion::estop_reset_all(); else app::motion::estop_all();
+            send_ack_ok(c, cmd.id);
             return;
         }
-        app::motion::Refusal err = {nullptr, nullptr};
-        const bool ok = (cmd.action[5] == 'l')
-                            ? app::motion::move_l(value, is_delta, err)
-                            : app::motion::move_c(value, is_delta, err);
-        reply(ok, err);
+        const int a = resolve_or_reply(c, cmd.id, axis);
+        if (a < 0) return;
+        reply(reset ? app::motion::estop_reset(static_cast<uint8_t>(a), err)
+                    : app::motion::estop(static_cast<uint8_t>(a), err));
         return;
     }
 
-    if (strcmp(cmd.action, "set_side") == 0) {
-        app::Side s;
-        if (!app::parse_args_set_side(line, line_len, s)) {
-            send_ack_err(conn.client, cmd.id, "bad_args",
-                         "expected side: hi_z|lo_z");
-            return;
-        }
-        app::motion::Refusal err = {nullptr, nullptr};
-        reply(app::motion::set_side(s, err), err);
+    if (strcmp(act, "set_home") == 0 || strcmp(act, "unset_home") == 0) {
+        if (!app::parse_args_axis(line, line_len, axis, /*required=*/true)) return bad_args("expected axis");
+        const int a = resolve_or_reply(c, cmd.id, axis);
+        if (a < 0) return;
+        reply(act[0] == 's' ? app::motion::set_home(static_cast<uint8_t>(a), err)
+                            : app::motion::unset_home(static_cast<uint8_t>(a), err));
         return;
     }
 
-    if (strcmp(cmd.action, "set_bypass") == 0) {
+    if (strcmp(act, "set_element") == 0) {
+        app::ElementKind kind; float max_rev = 0.0f;
+        if (!app::parse_args_set_element(line, line_len, axis, kind, max_rev)) return bad_args("expected axis, kind, max_rev");
+        const int a = resolve_or_reply(c, cmd.id, axis);
+        if (a >= 0) reply(app::motion::set_element(static_cast<uint8_t>(a), kind, max_rev, err));
+        return;
+    }
+
+    if (strcmp(act, "set_speed") == 0) {
+        uint32_t speed = 0, accel = 0;
+        if (!app::parse_args_set_speed(line, line_len, axis, speed, accel)) return bad_args("expected axis, speed[, accel]");
+        const int a = resolve_or_reply(c, cmd.id, axis);
+        if (a < 0) return;
+        if (accel == 0) accel = app::motion::axis_config(static_cast<uint8_t>(a)).accel;
+        reply(app::motion::set_speed(static_cast<uint8_t>(a), speed, accel, err));
+        return;
+    }
+
+    if (strcmp(act, "set_enabled") == 0) {
         bool on = true;
-        if (!app::parse_args_set_bypass(line, line_len, on)) {
-            send_ack_err(conn.client, cmd.id, "bad_args", "expected on: bool");
-            return;
-        }
-        app::motion::Refusal err = {nullptr, nullptr};
-        reply(app::motion::set_bypass(on, err), err);
+        if (!app::parse_args_set_enabled(line, line_len, axis, on)) return bad_args("expected axis, on");
+        const int a = resolve_or_reply(c, cmd.id, axis);
+        if (a >= 0) reply(app::motion::set_enabled(static_cast<uint8_t>(a), on, err));
         return;
     }
 
-    if (strcmp(cmd.action, "home") == 0) {
-        app::motion::Refusal err = {nullptr, nullptr};
-        reply(app::motion::home(err), err);
+    if (strcmp(act, "set_topology") == 0) {
+        app::Topology t;
+        if (!app::parse_args_set_topology(line, line_len, t)) return bad_args("expected kind + elements[{name,type,axis,pair}]");
+        reply(app::motion::set_topology(t, err));
         return;
     }
 
-    if (strcmp(cmd.action, "set_fwd_w") == 0) {
+    if (strcmp(act, "set_side") == 0) {
+        app::Side s;
+        if (!app::parse_args_set_side(line, line_len, s)) return bad_args("expected side: hi_z|lo_z");
+        reply(app::motion::set_side(s, err));
+        return;
+    }
+
+    if (strcmp(act, "set_bypass") == 0) {
+        bool on = true;
+        if (!app::parse_args_set_bypass(line, line_len, on)) return bad_args("expected on: bool");
+        reply(app::motion::set_bypass(on, err));
+        return;
+    }
+
+    if (strcmp(act, "home") == 0) { reply(app::motion::home(err)); return; }
+
+    if (strcmp(act, "set_fwd_w") == 0) {
         float w = 0.0f;
-        if (!app::parse_args_set_fwd_w(line, line_len, w)) {
-            send_ack_err(conn.client, cmd.id, "bad_args", "expected w: number");
-            return;
-        }
-        app::motion::Refusal err = {nullptr, nullptr};
-        reply(app::motion::set_fwd_w_fake(w, err), err);
+        if (!app::parse_args_set_fwd_w(line, line_len, w)) return bad_args("expected w: number");
+        reply(app::motion::set_fwd_w_fake(w, err));
         return;
     }
 
-    send_ack_err(conn.client, cmd.id, "unknown_action", cmd.action);
+    send_ack_err(c, cmd.id, "unknown_action", cmd.action);
 }
 
 // Drain pending bytes from one client; on every '\n' parse + dispatch.
@@ -183,19 +249,14 @@ void read_one(Connection &conn) {
                 if (app::parse_command(conn.rx_buf, conn.rx_len, cmd)) {
                     dispatch(conn, conn.rx_buf, conn.rx_len, cmd);
                 } else {
-                    char ack[200];
-                    int n = app::serialize_ack_err(ack, sizeof(ack), "",
-                                                   "bad_args",
-                                                   "malformed command");
-                    send_frame(conn.client, ack, n);
+                    send_ack_err(conn.client, "", "bad_args", "malformed command");
                 }
                 conn.rx_len = 0;
             }
             continue;
         }
         if (conn.rx_len + 1 >= sizeof(conn.rx_buf)) {
-            // Frame overflow — discard.
-            conn.rx_len = 0;
+            conn.rx_len = 0;   // frame overflow — discard
             continue;
         }
         conn.rx_buf[conn.rx_len++] = static_cast<char>(byte);
@@ -219,15 +280,12 @@ void manage_connections() {
             conn.client             = newClient;
             conn.in_use             = true;
             conn.rx_len             = 0;
-            conn.sent_initial_state = false;
-            // Send initial state immediately.
-            send_state_to(conn.client);
+            send_state_to(conn.client);   // warm start
             conn.sent_initial_state = true;
             return;
         }
     }
-    // Table full — politely close the new connection.
-    newClient.stop();
+    newClient.stop();   // table full
 }
 
 } // namespace
@@ -252,15 +310,13 @@ void publish(const app::Snapshot &snap) {
 void tick() {
     manage_connections();
     for (auto &conn : conns) {
-        if (conn.in_use) {
-            read_one(conn);
-        }
+        if (conn.in_use) read_one(conn);
     }
 
     if (published_dirty) {
         send_state_broadcast();
         published_dirty   = false;
-        last_heartbeat_ms = millis();  // reset HB timer; state counts as a frame
+        last_heartbeat_ms = millis();
     }
 
     const unsigned long now = millis();
@@ -273,7 +329,6 @@ void tick() {
 int connected_clients() {
     int n = 0;
     for (auto &conn : conns) {
-        // `connected()` isn't const in either backend's EthernetClient.
         if (conn.in_use && conn.client.connected()) ++n;
     }
     return n;

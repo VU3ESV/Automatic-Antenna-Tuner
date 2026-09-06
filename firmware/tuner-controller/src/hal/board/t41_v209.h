@@ -9,18 +9,19 @@
 // This header is **pin map + signal polarity + driver-electrical
 // defaults only — no logic**. Application code reaches axes and relays
 // through hal::Axis / hal::relay (hal/hal.h) and never sees these pin
-// numbers directly. Real-driver HAL implementations
-// (motor_teensy41.cpp, relay_teensy41.cpp, encoder_teensy41.cpp —
-// landing in M1b.2) translate the axis enum to these constants.
+// numbers directly. The real-driver HAL implementations
+// (motor_teensy41.cpp, relay_teensy41.cpp, limits_teensy41.cpp) translate
+// the axis index to these constants.
 //
 // The bench-test sketch firmware/t41-stepper-test/ also consumes this
 // header (via -I in its platformio.ini) so bench and production
 // firmware share a single source of truth for the carrier wiring.
 //
-// Topology mapping per docs/HW-T41-PINMAP.md §7:
-//   L-Match : X = roller inductor (L), Y = vacuum cap (C), Z unused
-//   T-Match : X = series C1,           Y = series C2,      Z = shunt L
-//   Pi-Match: X = shunt C1,            Y = series L,       Z = shunt C2
+// Element → axis mapping is the operator's install-time choice
+// (`set_topology`, persisted by app/config.cpp — CLAUDE.md "Topology vs
+// firmware"). Defaults:
+//   Balanced L : X = inductor pair (L), Y = capacitor (C),     Z spare
+//   Balanced Pi: X = C1,                Y = inductor pair (L), Z = C2
 
 #include <cstdint>
 
@@ -75,9 +76,11 @@ constexpr uint8_t STEP_MIN_PULSE_US = 5;
 // vacuum-relay coils via opto-isolated MOSFET stages; the HV bias side
 // is independent. See docs/HW-T41-PINMAP.md §5.
 //
-// K1 / K2 are L-Match-only — the Hi-Z / Lo-Z selector relay pair is
-// unused in the symmetric T / Pi topologies. K3 (bypass) is retained
-// across all topologies per CLAUDE.md invariant 2.
+// K1 / K2 are Balanced-L-only — the Hi-Z / Lo-Z selector relay pair is
+// absent in the Balanced Pi. Every switch is two-pole (both line legs)
+// from one driver output. K3 (bypass) is retained across both
+// topologies per CLAUDE.md invariant 2; hal/relay_teensy41.cpp maps
+// bypass to the de-energised coil state.
 constexpr uint8_t RELAY_K1_HIZ    = 12;  // SPINDLE EN
 constexpr uint8_t RELAY_K2_LOZ    = 11;  // SPINDLE DIR
 constexpr uint8_t RELAY_K3_BYPASS = 19;  // COOLANT FLOOD (latched at power-up)

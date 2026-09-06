@@ -15,7 +15,7 @@ For the architecture this plan implements, see
 | M  | Name                        | Deliverable                                                                                            | Status (2026-05-11)                              |
 |----|-----------------------------|--------------------------------------------------------------------------------------------------------|--------------------------------------------------|
 | M0 | Scaffolding                 | Repo skeleton, CI, two binaries that build and exchange a heartbeat.                                   | **✅** (master + firmware skeleton + CI)         |
-| M1 | Motion + position           | iHSS60 axes drive the elements directly, homed by belt-driven lead-screw limit switches; bypass + relay state machine; faked RF. | **M1a ✅ · M1b.1 ✅ · M1b.2 software half ✅ · M1b.2 real drivers pending HW** |
+| M1 | Motion + position           | iHSS60 axes drive the elements directly, homed by belt-driven lead-screw limit switches; bypass + relay state machine; faked RF. | **M1a ✅ · M1b.1 ✅ · M1b.2 real drivers on the T41 carrier ✅ (2026-09-06) · lead-screw limit mechanism + ALM/PED pending HW** |
 | M2 | Measurement                 | AD8302 + dual AD8307 chains live; SWR, R, X reported in `telemetry`.                                   | Pending hardware                                  |
 | M3 | Master core + GUI           | Go master with embedded web UI, CAT polling, ANO encoders, memory store.                               | Partial — UI + WS hub + Operate panel + command forwarding done; CAT / ANO encoders / SQLite memory pending |
 | M4 | Auto-tune algorithm         | Recall + analytic L-network solve + hill-climb fine-tune, validated on a dummy load network.           | Pending M2/M3                                     |
@@ -52,11 +52,12 @@ drive-train checks), Phase 2 (Balanced Pi auto-tune, optional fixed-cap
 bank).
 
 - [ ] **Reconcile the remaining docs** that still describe the
-      unbalanced design: `ARCHITECTURE.md`, `RF-DESIGN.md`,
-      `PROTOCOL.md` (add the `set_topology` entry with the element
-      map), `HW-T41-CARRIER.md`, `HW-T41-PINMAP.md` (two-switch axes,
-      opto-input budget, relay pairs), `TUNING.md`, `../README.md`,
-      `../PROPOSAL.md`, and the axis-mapping comment in
+      unbalanced design: `ARCHITECTURE.md` (§5.1.3 done 2026-09-06;
+      §2 / §4 still unbalanced), `RF-DESIGN.md`, `HW-T41-CARRIER.md`,
+      `HW-T41-PINMAP.md` (two-switch axes, opto-input budget, relay
+      pairs), `TUNING.md`, `../README.md`, `../PROPOSAL.md`.
+      Done 2026-09-06: `PROTOCOL.md` (`set_topology`, `move_axis`,
+      per-axis `state` fields) and the axis-mapping comment in
       `firmware/tuner-controller/src/hal/board/t41_v209.h`.
 
 Numbers below assume one operator and an existing bench (scope, signal
@@ -161,6 +162,33 @@ End-to-end: Teensy → master → browser shows real controller state.
 
 #### M1b.2 — Hardware integration (motion / measurement / safety)
 
+- [x] **Production controller running on the T41 carrier (2026-09-06).**
+      `firmware/tuner-controller` now has real Teensy 4.1 backends behind
+      the HAL — `motor_teensy41.cpp` (three FlexPWM axes via the shared
+      `firmware/lib/flexpwm_stepper/` library, trapezoidal ramps, drives
+      held enabled), `relay_teensy41.cpp` (K1/K2/K3 on carrier outputs
+      12/11/19; bypass is the de-energised state and is latched before
+      anything else at boot), `limits_teensy41.cpp` (end-stop opto
+      inputs, reported), `nvs_teensy41.cpp` (emulated EEPROM with update
+      semantics) — with sim backends kept for the native tests. The app
+      layer gained `app/config` (Balanced L / Balanced Pi topology with
+      the operator's element→axis map, per-axis element kind + rated
+      travel + speed, clean-shutdown position anchors) and the bench's
+      travel-window logic moved into `app::motion` where it is unit-
+      tested (29 native tests). Invariant 3 is enforced as *anchoring*:
+      an axis moves only when its home is declared and the last
+      power-down was clean, except bounded setup moves in bypass. Two
+      control surfaces share one verb layer: the master TCP link
+      (`move_axis`, `run`, `set_home`, `set_element`, `set_speed`,
+      `set_topology`, … — PROTOCOL.md) and an HTTP server + embedded
+      page on port 80 (`http_server.h`), which is the operating UI until
+      the Pi master is deployed. Flashed to the bench board the same day;
+      motion on real elements not yet exercised through this build.
+      Same day: latched per-motor / all-motor **E-stop** with industrial
+      beacon + toggle mushroom buttons in the page, and **settings on
+      the Teensy 4.1 microSD** (`/tuner/config.json`, human-readable;
+      card wins for settings at boot, EEPROM stays authoritative for
+      position anchors and mirrors everything — `app/settings.h`).
 - [x] Add `hal::encoder`, `hal::motor`, `hal::relay`, `hal::safety`
       interfaces to the firmware HAL. Implementations for `TARGET_TEENSY41`
       gate stepper / QEI / GPIO calls; `TARGET_NATIVE` provides stubs
@@ -183,6 +211,24 @@ End-to-end: Teensy → master → browser shows real controller state.
       Hi-Z / Lo-Z toggle (auto-highlighted from `state.side`), bypass
       engage/release, re-home button, fake-Fwd-W injector, last-ack
       readout. Two-client smoke deferred to bench validation.
+- [x] **Bench software travel window** (`firmware/t41-stepper-test`,
+      2026-09-06): each bench axis declares the element it drives —
+      roller inductor, vacuum-variable capacitor, variable capacitor
+      with or without end stops, variometer — and, for elements with
+      stops, its rated travel in revolutions. Once home is declared
+      (O / "Set current pos as home") the firmware clamps every motion
+      verb — jog, single step, ±N steps, ±N rev, run CW/CCW — to
+      `[0, rated_rev × 6400]`, stops exactly on the bound, refuses a
+      move that would leave the window, and the web UI shows a
+      per-motor "STOPPED AT HOME / MAX LIMIT" badge plus a travel bar
+      and turn counter. Single-step buttons (±1 / ±10 / ±100 / ±N)
+      added for fine tuning; the ISR-counted position is updated for
+      every pulse. Kind, home flag and rated travel persist in EEPROM.
+      This is the bench prototype of the invariant-7 software soft
+      limits; production adds `SAFE_MARGIN` inside the lead-screw
+      switches and PED confirmation. Same day: third bench axis `Z` on
+      the carrier's Z channel (FlexPWM2.2, own EEPROM block), so the
+      rig now covers a Balanced Pi motor count.
 - [ ] **Carrier-board bring-up** — assemble / verify Phil Barrett's
       grblHAL-teensy-4.x V2.09 board (T41E5XBB SKU for Ethernet) and
       author `firmware/tuner-controller/hal/board/t41_v209.{h,cpp}`
