@@ -9,7 +9,8 @@
 //   [2]  Ethernet PHY link + DHCP via the configured net_hal backend.
 //   [3]  Master link: TCP line-JSON server on port 8089 (docs/PROTOCOL.md).
 //   [4]  Browser control: HTTP server + embedded page on port 80.
-//   [5]  Loop: service motion, publish the snapshot, tick both servers.
+//   [5]  Loop: service motion, publish the snapshot, tick both servers,
+//        perform a pending over-Ethernet firmware apply (app/ota.h).
 //
 // Nothing moves at boot. Unlike the bench rig there is no drive-to-zero
 // on power-up: positions come back from EEPROM as anchors and the
@@ -18,8 +19,10 @@
 #include <Arduino.h>
 
 #include "app/motion.h"
+#include "app/ota.h"
 #include "app/settings.h"
 #include "app/state.h"
+#include "build_info.h"
 #include "hal/hal.h"
 #include "http_server.h"
 #include "net_hal.h"
@@ -100,6 +103,7 @@ void setup() {
     Serial.println();
     Serial.println("===========================================");
     Serial.println("Automatic Antenna Tuner — controller");
+    Serial.printf("Build:       %s  (git %s, env %s)\n", kBuildStamp, kBuildGit, kBuildEnv);
     Serial.printf("Net backend: %s\n", net_hal::lib_name());
     Serial.println("===========================================");
     Serial.println("[0] K3 BYPASS latched; drives enabled; config restored:");
@@ -152,6 +156,9 @@ void loop() {
         tuner_server::tick();
         http_server::tick(snapshot, tuner_server::connected_clients());
     }
+
+    // Delayed apply of a staged firmware image (reboots) — app/ota.h.
+    app::ota::tick(now);
 
     if ((now - lastStatusMs) >= STATUS_PERIOD_MS) {
         lastStatusMs = now;

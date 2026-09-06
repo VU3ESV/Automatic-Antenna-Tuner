@@ -162,6 +162,14 @@ End-to-end: Teensy → master → browser shows real controller state.
 
 #### M1b.2 — Hardware integration (motion / measurement / safety)
 
+- [x] **Firmware update over Ethernet (2026-09-06).** `POST /api/firmware`
+      streams PlatformIO's hex into the controller, which stages it in
+      free flash (FlasherX flash layer, `hal::firmware`), reports record
+      count + CRC-32, and reboots into it on `firmware_apply` once the
+      uploader has compared the CRC — gated on bypass, no motion, no RF.
+      `pio run -e teensy41_native_ota -t upload` or the browser panel.
+      EEPROM emulation region reserved; USB remains first-install and
+      recovery. Rules in CLAUDE.md "Firmware update over Ethernet".
 - [x] **Production controller running on the T41 carrier (2026-09-06).**
       `firmware/tuner-controller` now has real Teensy 4.1 backends behind
       the HAL — `motor_teensy41.cpp` (three FlexPWM axes via the shared

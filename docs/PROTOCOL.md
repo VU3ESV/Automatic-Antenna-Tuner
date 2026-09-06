@@ -46,6 +46,38 @@ deployed. Every HTTP verb calls the same `app::motion` entry point as
 the corresponding TCP verb, so the two surfaces cannot disagree; the
 master remains the long-term operator UI.
 
+**Firmware update over Ethernet (since 2026-09-06).** HTTP only — there
+is no firmware verb on the master link. `POST /api/firmware` with the
+Intel-HEX file as the body (`Content-Length` required; `Expect:
+100-continue` honoured) streams the records into the controller, which
+stages the image in free flash above the running program and replies
+`200` with `key=value` lines — `lines` (records consumed, EOF included),
+`bytes`, `range=0xMIN-0xMAX`, `crc32` (CRC-32 of the staged image, gaps
+as `FF`), `target`, and the apply command — or `400 <code>: <msg>` when
+the file is rejected (`bad_hex` — malformed, checksum, record after
+EOF, descending or overlapping data records, `bad_image` — not at the
+flash base or below it, `too_big`, `wrong_target` — the image lacks the
+target id `fw_aat_teensy41`, `flash_write`, `flash_read`), `409` when it
+cannot start (`moving`, `busy`, `no_buffer`, `unsupported`), `408` when
+the client stalls. `GET /api/firmware_apply?lines=N` reboots into the
+staged image when `N` equals the staged record count; refused with
+`not_staged`, `bad_args` (also `400` when `lines` is missing),
+`not_bypassed`, `moving` or `rf_lockout`. The copy runs a few hundred ms
+later and re-checks the same gates first: if one fails the state drops
+back to `staged` with `code` `apply_aborted` and the request must be
+repeated. While the apply is pending every motion and relay verb (other
+than engaging bypass) is refused with `updating`. The copy itself takes
+several seconds (erase-dominated) — do not power-cycle. `GET
+/api/firmware_abort` discards the staged image; refused with `moving`
+(the erase masks interrupts) or `busy` once an apply is pending. `GET
+/api/firmware` returns the status object that `/api/status` also carries
+as `ota` (`state` idle / receiving / staged / applying / error,
+`supported`, `target`, `lines`, `bytes`, `capacity`, `crc32`, `min`,
+`max`, `code`, `msg`); `/api/status` also carries `build` (`stamp`,
+`git`, `env`) so an update can be seen to have landed. Client: `firmware/tuner-controller/tools/ota_upload.py`, used by
+the `teensy41_ota` / `teensy41_native_ota` PlatformIO environments.
+Rules in CLAUDE.md "Firmware update over Ethernet".
+
 ## 1. Framing
 
 - Browser↔Master: one WebSocket text frame per protocol frame. No

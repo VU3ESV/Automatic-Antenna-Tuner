@@ -1,12 +1,16 @@
 #include "http_server.h"
 
 #include <Arduino.h>
+#include <cctype>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
 #include "app/motion.h"
+#include "app/ota.h"
 #include "app/settings.h"
+#include "build_info.h"
 #include "net_hal.h"
 #include "web_page.h"
 
@@ -42,10 +46,10 @@ void send_text(EthernetClient &c, int code, const char *status, const char *body
 void send_ok(EthernetClient &c, const char *body)  { send_text(c, 200, "OK", body); }
 void send_bad(EthernetClient &c, const char *body) { send_text(c, 400, "Bad Request", body); }
 
-void send_refusal(EthernetClient &c, const app::motion::Refusal &e) {
-    char body[160];
+void send_refusal(EthernetClient &c, const app::Refusal &e, int code = 409, const char *status = "Conflict") {
+    char body[200];
     snprintf(body, sizeof(body), "%s: %s\n", e.code ? e.code : "refused", e.msg ? e.msg : "");
-    send_text(c, 409, "Conflict", body);
+    send_text(c, code, status, body);
 }
 
 void send_index(EthernetClient &c) {
@@ -117,23 +121,57 @@ void reply_move(EthernetClient &c, app::motion::MoveResult r, const app::motion:
 
 const char *axis_letter(uint8_t a) { return a == 0 ? "X" : a == 1 ? "Y" : a == 2 ? "Z" : "?"; }
 
+// {"state":..,"supported":..,...} — the firmware-update status object,
+// embedded in /api/status and served alone at GET /api/firmware.
+int ota_json(char *out, size_t max) {
+    const app::ota::Status &o = app::ota::status();
+    return snprintf(out, max,
+        "{\"state\":\"%s\",\"supported\":%s,\"target\":\"%s\",\"lines\":%lu,\"bytes\":%lu,"
+        "\"capacity\":%lu,\"crc32\":\"%08lx\",\"min\":\"0x%08lX\",\"max\":\"0x%08lX\",\"code\":\"%s\",\"msg\":\"%s\"}",
+        app::ota::state_name(o.state), o.supported ? "true" : "false", o.target,
+        static_cast<unsigned long>(o.lines), static_cast<unsigned long>(o.bytes),
+        static_cast<unsigned long>(o.capacity), static_cast<unsigned long>(o.crc32),
+        static_cast<unsigned long>(o.bytes ? o.min_addr : 0), static_cast<unsigned long>(o.max_addr),
+        o.code, o.msg);
+}
+
+// vsnprintf at json + n, clamping n to cap once the buffer is full so a
+// later `cap - n` can never wrap; the caller checks n < cap before sending.
+__attribute__((format(printf, 4, 5)))
+int put(char *json, size_t cap, int n, const char *fmt, ...) {
+    if (n < 0 || static_cast<size_t>(n) >= cap) return static_cast<int>(cap);
+    va_list ap;
+    va_start(ap, fmt);
+    const int w = vsnprintf(json + n, cap - static_cast<size_t>(n), fmt, ap);
+    va_end(ap);
+    if (w < 0 || static_cast<size_t>(n) + static_cast<size_t>(w) >= cap) return static_cast<int>(cap);
+    return n + w;
+}
+
 void send_status(EthernetClient &c, const app::Snapshot &s, int master_clients) {
-    static char json[3072];
+    static char json[3072];   // measured worst case (3 axes, full ota msg): ~2 KB
+    const size_t cap = sizeof(json);
     const IPAddress ip = Ethernet.localIP();
-    int n = snprintf(json, sizeof(json),
+    int n = put(json, cap, 0,
         "{\"net\":{\"backend\":\"%s\",\"link\":\"%s\",\"ip\":\"%u.%u.%u.%u\",\"master_clients\":%d},"
         "\"topology\":{\"kind\":\"%s\",\"elements\":[",
         net_hal::lib_name(), net_hal::link_state() ? "up" : "down",
         ip[0], ip[1], ip[2], ip[3], master_clients,
         app::topology_kind_name(s.topology.kind));
-    for (uint8_t i = 0; i < s.topology.n && n < static_cast<int>(sizeof(json)); i++) {
+    for (uint8_t i = 0; i < s.topology.n; i++) {
         const app::ElementBinding &b = s.topology.elements[i];
-        n += snprintf(json + n, sizeof(json) - n, "%s{\"name\":\"%s\",\"type\":\"%s\",\"axis\":%u,\"pair\":%s}",
-                      i ? "," : "", b.name, b.type == app::ElementType::L ? "L" : "C", b.axis,
-                      b.pair ? "true" : "false");
+        n = put(json, cap, n, "%s{\"name\":\"%s\",\"type\":\"%s\",\"axis\":%u,\"pair\":%s}",
+                i ? "," : "", b.name, b.type == app::ElementType::L ? "L" : "C", b.axis,
+                b.pair ? "true" : "false");
     }
-    n += snprintf(json + n, sizeof(json) - n,
-        "]},\"side\":\"%s\",\"bypass\":%s,\"moving\":%s,\"homed\":%s,\"rf_lockout\":%s,\"estop_all\":%s,\"fwd_w\":%.1f,"
+    n = put(json, cap, n, "]},\"build\":{\"stamp\":\"%s\",\"git\":\"%s\",\"env\":\"%s\"},\"ota\":",
+            kBuildStamp, kBuildGit, kBuildEnv);
+    if (n < static_cast<int>(cap)) {
+        const int w = ota_json(json + n, cap - static_cast<size_t>(n));
+        n = (w < 0 || n + w >= static_cast<int>(cap)) ? static_cast<int>(cap) : n + w;
+    }
+    n = put(json, cap, n,
+        ",\"side\":\"%s\",\"bypass\":%s,\"moving\":%s,\"homed\":%s,\"rf_lockout\":%s,\"estop_all\":%s,\"fwd_w\":%.1f,"
         "\"settings\":{\"source\":\"%s\",\"sd_present\":%s,\"sd_ok\":%s,\"sd_saves\":%lu},"
         "\"last_move_ms\":%lu,\"axes\":[",
         s.side == app::Side::HiZ ? "hi_z" : "lo_z",
@@ -143,11 +181,11 @@ void send_status(EthernetClient &c, const app::Snapshot &s, int master_clients) 
         s.sd_present ? "true" : "false", s.sd_ok ? "true" : "false",
         static_cast<unsigned long>(app::settings::status().sd_saves),
         static_cast<unsigned long>(s.last_move_ms));
-    for (uint8_t a = 0; a < hal::kMaxAxes && n < static_cast<int>(sizeof(json)); a++) {
+    for (uint8_t a = 0; a < hal::kMaxAxes; a++) {
         const app::AxisSnapshot &x = s.axes[a];
         const char *name = (x.element >= 0 && x.element < static_cast<int8_t>(s.topology.n))
                              ? s.topology.elements[x.element].name : "";
-        n += snprintf(json + n, sizeof(json) - n,
+        n = put(json, cap, n,
             "%s{\"axis\":%u,\"letter\":\"%s\",\"name\":\"%s\",\"steps\":%ld,\"enc\":%ld,\"moving\":%s,\"enabled\":%s,"
             "\"limit_sw\":%s,\"kind\":\"%s\",\"home_set\":%s,\"anchored\":%s,\"max_rev\":%.3f,\"max_steps\":%ld,"
             "\"travel\":\"%s\",\"last_clamp\":\"%s\",\"estop\":%s,\"turns\":%.3f,\"speed\":%lu,\"accel\":%lu}",
@@ -160,7 +198,8 @@ void send_status(EthernetClient &c, const app::Snapshot &s, int master_clients) 
             static_cast<double>(x.steps) / static_cast<double>(app::kStepsPerRev),
             static_cast<unsigned long>(x.speed), static_cast<unsigned long>(x.accel));
     }
-    n += snprintf(json + n, sizeof(json) - n, "]}");
+    n = put(json, cap, n, "]}");
+    if (n >= static_cast<int>(cap)) { send_text(c, 500, "Internal Server Error", "status too large\n"); return; }
     send_header(c, 200, "OK", "application/json", n);
     write_all(c, json, n);
 }
@@ -337,6 +376,29 @@ void dispatch(EthernetClient &c, const char *path, const char *query,
         send_ok(c, app::settings::flush() ? "config.json written to the SD card\n" : "SD write FAILED\n"); return;
     }
 
+    // ── Firmware update over Ethernet (docs/PROTOCOL.md) ──────────────────
+    if (strcmp(path, "/api/firmware") == 0) {
+        static char body[512];
+        const int n = ota_json(body, sizeof(body));
+        send_header(c, 200, "OK", "application/json", n);
+        write_all(c, body, n); return;
+    }
+
+    if (strcmp(path, "/api/firmware_apply") == 0) {
+        if (!get_param(query, "lines", v, sizeof(v))) {
+            err = {"bad_args", "missing lines (the staged record count)"};
+            send_refusal(c, err, 400, "Bad Request"); return;
+        }
+        if (!app::ota::request_apply(static_cast<uint32_t>(strtoul(v, nullptr, 10)), err)) { send_refusal(c, err); return; }
+        send_ok(c, "applying - the controller copies the image in a few seconds (erase-dominated; do not power-cycle) "
+                   "and is back on the network in about 20 s\n"); return;
+    }
+
+    if (strcmp(path, "/api/firmware_abort") == 0) {
+        if (!app::ota::abort(err)) { send_refusal(c, err); return; }
+        send_ok(c, "staged firmware discarded\n"); return;
+    }
+
     if (strcmp(path, "/api/fwd_w") == 0) {
         if (!get_param(query, "w", v, sizeof(v))) { send_bad(c, "missing w\n"); return; }
         app::motion::set_fwd_w_fake(strtof(v, nullptr), err);
@@ -346,31 +408,107 @@ void dispatch(EthernetClient &c, const char *path, const char *query,
     send_text(c, 404, "Not Found", "no such route\n");
 }
 
-// Read the request line; drain headers up to the blank line.
-bool read_request(EthernetClient &c, char *line, size_t linesz) {
-    const unsigned long start = millis();
+// ── Request parsing ─────────────────────────────────────────────────────
+
+struct Request {
+    long content_length = -1;   // POST body size, -1 when absent
+    bool expect_continue = false;   // curl sends "Expect: 100-continue" for bodies > 1 KB
+};
+
+// One CRLF-terminated line into buf (truncated at sz-1, the rest consumed).
+bool read_line(EthernetClient &c, unsigned long deadline, char *buf, size_t sz, size_t &len) {
+    len = 0;
+    while (c.connected() && static_cast<long>(millis() - deadline) < 0) {
+        if (!c.available()) { delay(1); continue; }
+        const int b = c.read();
+        if (b < 0) break;
+        if (b == '\r') continue;
+        if (b == '\n') { buf[len] = '\0'; return true; }
+        if (len + 1 < sz) buf[len++] = static_cast<char>(b);
+    }
+    buf[len] = '\0';
+    return false;
+}
+
+// Case-insensitive "Name:" prefix test; returns the value start or nullptr.
+const char *header_value(const char *line, const char *name) {
     size_t i = 0;
-    bool gotLF = false;
-    while (c.connected() && (millis() - start) < 500) {
-        if (!c.available()) { delay(1); continue; }
-        const int b = c.read();
-        if (b < 0) break;
-        if (b == '\r') continue;
-        if (b == '\n') { gotLF = true; break; }
-        if (i + 1 < linesz) line[i++] = static_cast<char>(b);
+    for (; name[i]; i++) {
+        if (tolower(static_cast<unsigned char>(line[i])) != tolower(static_cast<unsigned char>(name[i]))) return nullptr;
     }
-    line[i] = '\0';
-    if (!gotLF) return false;
-    int state = 1;
-    while (c.connected() && (millis() - start) < 500) {
-        if (!c.available()) { delay(1); continue; }
-        const int b = c.read();
-        if (b < 0) break;
-        if (b == '\r') continue;
-        if (b == '\n') { if (state == 1) return true; state = 1; }
-        else state = 0;
+    if (line[i] != ':') return nullptr;
+    const char *v = line + i + 1;
+    while (*v == ' ' || *v == '\t') v++;
+    return v;
+}
+
+// Request line into `line`; headers parsed for the two we care about.
+bool read_request(EthernetClient &c, char *line, size_t linesz, Request &req) {
+    const unsigned long deadline = millis() + 1000;
+    size_t len = 0;
+    if (!read_line(c, deadline, line, linesz, len) || len == 0) return false;
+    char hdr[160];
+    for (;;) {
+        if (!read_line(c, deadline, hdr, sizeof(hdr), len)) return false;
+        if (len == 0) return true;   // blank line ends the headers
+        if (const char *v = header_value(hdr, "Content-Length")) req.content_length = atol(v);
+        else if (const char *e = header_value(hdr, "Expect")) req.expect_continue = strstr(e, "100-continue") != nullptr;
     }
-    return true;
+}
+
+// ── POST /api/firmware — stream an Intel-HEX body into app::ota ─────────
+//
+// The body is read in ≤ 1 KB pieces straight into the hex parser, which
+// stages the image in flash as it goes; nothing is buffered whole. The
+// main loop is blocked for the transfer (a few seconds for ~700 KB),
+// which is why app::ota::begin() refuses while an axis is moving.
+// Reply: 200 with a key=value summary (lines, bytes, range, crc32, and
+// the apply command); 400 with "<code>: <msg>" when the hex is rejected;
+// 409 when the update cannot start; 408 when the client stalls.
+
+constexpr unsigned long kUploadIdleMs  = 5000;
+constexpr unsigned long kUploadTotalMs = 120000;
+
+void handle_firmware_post(EthernetClient &c, const Request &req) {
+    app::Refusal err = {nullptr, nullptr};
+    if (req.content_length <= 0) { send_bad(c, "missing Content-Length\n"); return; }
+    if (!app::ota::begin(err)) { send_refusal(c, err); return; }
+    if (req.expect_continue) write_all(c, "HTTP/1.1 100 Continue\r\n\r\n", 25);
+
+    static char buf[1024];
+    long          got   = 0;
+    unsigned long start = millis();
+    unsigned long last  = start;
+    while (got < req.content_length) {
+        if (!c.connected()) { app::ota::cancel_transfer(); return; }
+        const unsigned long now = millis();
+        if (now - last > kUploadIdleMs || now - start > kUploadTotalMs) {
+            app::ota::cancel_transfer();
+            send_text(c, 408, "Request Timeout", "upload stalled\n");
+            return;
+        }
+        const int avail = c.available();
+        if (avail <= 0) { delay(1); continue; }
+        size_t want = static_cast<size_t>(avail);
+        if (want > sizeof(buf)) want = sizeof(buf);
+        if (static_cast<long>(want) > req.content_length - got) want = static_cast<size_t>(req.content_length - got);
+        const int n = c.read(reinterpret_cast<uint8_t *>(buf), want);
+        if (n <= 0) { delay(1); continue; }
+        got  += n;
+        last  = millis();
+        if (!app::ota::feed(buf, static_cast<size_t>(n), err)) { send_refusal(c, err, 400, "Bad Request"); return; }
+    }
+    if (!app::ota::finish(err)) { send_refusal(c, err, 400, "Bad Request"); return; }
+
+    const app::ota::Status &s = app::ota::status();
+    char body[320];
+    snprintf(body, sizeof(body),
+             "staged\nlines=%lu\nbytes=%lu\nrange=0x%08lX-0x%08lX\ncrc32=%08lx\ntarget=%s\n"
+             "apply=GET /api/firmware_apply?lines=%lu\n",
+             static_cast<unsigned long>(s.lines), static_cast<unsigned long>(s.bytes),
+             static_cast<unsigned long>(s.min_addr), static_cast<unsigned long>(s.max_addr),
+             static_cast<unsigned long>(s.crc32), s.target, static_cast<unsigned long>(s.lines));
+    send_ok(c, body);
 }
 
 } // namespace
@@ -385,8 +523,9 @@ void tick(const app::Snapshot &snap, int master_clients) {
     EthernetClient client = server.accept();
     if (!client) return;
 
-    char line[256];
-    if (!read_request(client, line, sizeof(line))) { client.stop(); return; }
+    char    line[256];
+    Request req;
+    if (!read_request(client, line, sizeof(line), req)) { client.stop(); return; }
 
     char *method = line;
     char *path = strchr(line, ' ');
@@ -397,8 +536,12 @@ void tick(const app::Snapshot &snap, int master_clients) {
     char *query = strchr(path, '?');
     if (query) { *query++ = '\0'; } else { query = const_cast<char *>(""); }
 
-    if (strcmp(method, "GET") != 0) send_text(client, 405, "Method Not Allowed", "GET only\n");
-    else                            dispatch(client, path, query, snap, master_clients);
+    if (strcmp(method, "GET") == 0)       dispatch(client, path, query, snap, master_clients);
+    else if (strcmp(method, "POST") == 0) {
+        if (strcmp(path, "/api/firmware") == 0) handle_firmware_post(client, req);
+        else send_text(client, 404, "Not Found", "no such route\n");
+    }
+    else send_text(client, 405, "Method Not Allowed", "GET, or POST /api/firmware\n");
 
     // flush() before stop(): NativeEthernet's stop() discards anything
     // still in FNET's send buffer. Harmless on QNEthernet.

@@ -33,6 +33,7 @@ button.go{background:#1c3a1c;border-color:#494}
 button.go:hover{background:#264826}
 button.sel{background:#3a3a1c;border-color:#aa4}
 button.big{font-size:1.05em;padding:.6em 1.2em}
+code{color:#8bf}
 input[type=number],select{background:#222;color:#eee;border:1px solid #555;padding:.4em;border-radius:4px;width:7em;font-size:1em;font-family:inherit}
 select{width:auto}
 .kv{font-size:.85em;color:#aaa}
@@ -76,7 +77,7 @@ button.estop.down:active{transform:translateY(0)}
 </style></head>
 <body>
 <h1>Antenna Tuner Controller</h1>
-<div class="top">backend <b id="be">?</b> <span class="sep">·</span> ip <b id="ip">?</b> <span class="sep">·</span> link <b id="ln">?</b> <span class="sep">·</span> master clients <b id="mc">?</b> <span class="sep">·</span> homed <b id="hm">?</b> <span class="sep">·</span> fwd <b id="fw">?</b> W <span class="sep">·</span> settings <b id="stg">?</b> <a href="/api/settings" target="_blank" style="color:#8bf">view config</a> <a href="/api/settings?src=card" target="_blank" style="color:#8bf">read card</a> <button onclick="cmd('/api/settings_save','net')" style="padding:.1em .5em;font-size:.85em">save to card now</button></div>
+<div class="top">backend <b id="be">?</b> <span class="sep">·</span> ip <b id="ip">?</b> <span class="sep">·</span> link <b id="ln">?</b> <span class="sep">·</span> master clients <b id="mc">?</b> <span class="sep">·</span> homed <b id="hm">?</b> <span class="sep">·</span> fwd <b id="fw">?</b> W <span class="sep">·</span> settings <b id="stg">?</b> <a href="/api/settings" target="_blank" style="color:#8bf">view config</a> <a href="/api/settings?src=card" target="_blank" style="color:#8bf">read card</a> <button onclick="cmd('/api/settings_save','net')" style="padding:.1em .5em;font-size:.85em">save to card now</button> <span class="sep">·</span> build <b id="bld">?</b></div>
 
 <div class="panel" id="net">
   <div class="row">
@@ -110,6 +111,19 @@ button.estop.down:active{transform:translateY(0)}
   <div class="msg" id="msg-topo"></div>
 </div>
 
+<div class="panel" id="fwpanel">
+  <h2>Firmware update over Ethernet</h2>
+  <div class="row kv">running <b id="fwrun">?</b> <span class="sep">·</span> target <b id="fwt">?</b> <span class="sep">·</span> staged <b id="fws">?</b> <span id="fwi"></span></div>
+  <div class="row">
+    <input type="file" id="fwfile" accept=".hex">
+    <button onclick="fwUpload()">Upload .hex</button>
+    <button class="go" id="fwApply" onclick="fwApply()" disabled>Apply &amp; reboot</button>
+    <button id="fwDiscard" onclick="cmd('/api/firmware_abort','fw')">Discard</button>
+    <span class="kv">or <code>pio run -e teensy41_native_ota -t upload</code> · upload, discard and apply need every axis stopped; apply also needs bypass and no RF · the copy takes a few seconds — do not power-cycle · first install and recovery stay on USB</span>
+  </div>
+  <div class="msg" id="msg-fw"></div>
+</div>
+
 <script>
 const KINDS=[['unset','— not set —'],['inductor','Roller inductor (stops)'],['vacuum_cap','Vacuum variable cap (stops)'],['varcap_limited','Variable cap with stops'],['varcap_free','Variable cap, free rotation'],['variometer','Variometer, free rotation']];
 const LIMITED={inductor:1,vacuum_cap:1,varcap_limited:1};
@@ -135,6 +149,14 @@ function estopToggle(ax){const a=last&&last.axes.find(x=>x.axis===ax);
 function estopAllToggle(){const any=last&&last.axes.some(a=>a.estop);
   if(any){if(confirm('Release ALL emergency stops?'))cmd('/api/estop_reset','net');}
   else cmd('/api/estop','net');}
+async function fwUpload(){const f=document.getElementById('fwfile').files[0];if(!f){lastMsg['fw']='✗ choose a .hex file first';render(last);return;}
+  if(!confirm('Upload '+f.name+' ('+Math.round(f.size/1024)+' KB) to the controller?\nNothing is applied until you press Apply.'))return;
+  lastMsg['fw']='uploading '+f.name+' …';render(last);
+  try{const r=await fetch('/api/firmware',{method:'POST',body:f});const t=(await r.text()).trim();lastMsg['fw']=(r.ok?'':'✗ ')+t.replace(/\n/g,' · ');}catch(e){lastMsg['fw']='✗ upload failed: '+e;}
+  await poll();}
+function fwApply(){const o=last&&last.ota;if(!o||o.state!=='staged')return;
+  if(!confirm('Apply the staged firmware ('+o.lines+' records, '+o.bytes+' bytes, crc32 '+o.crc32+') and reboot the controller?\nBypass must be engaged and nothing may be moving.'))return;
+  cmd('/api/firmware_apply?lines='+o.lines,'fw');}
 function unhome(ax){if(confirm('Unset home on axis '+ax+'? Travel window INACTIVE and the axis is unanchored until you set home again.'))cmd('/api/unhome?axis='+ax,ax);}
 function drv(ax,on){if(!on&&!confirm('Disable the driver on axis '+ax+'? The element can then be turned by hand and the position counter will be wrong until you re-declare home.'))return;cmd('/api/enable?axis='+ax+'&on='+(on?1:0),ax);}
 function syncField(el,v){if(!el||document.activeElement===el)return;const live=String(v);
@@ -178,6 +200,14 @@ function render(s){
   stg.textContent=sg.sd_present?('SD card'+(sg.sd_ok?' ✓':' ✗ write failed')+' + EEPROM'+(sg.source==='sd'?' (booted from card)':'')):'EEPROM only — no SD card';
   stg.style.color=sg.sd_present?(sg.sd_ok?'#4f4':'#f44'):'#fc3';
   buzzer(anyE);
+  const bi=s.build||{},o=s.ota||{};document.getElementById('bld').textContent=(bi.stamp||'?')+' '+(bi.git||'');
+  document.getElementById('fwrun').textContent=(bi.stamp||'?')+' · git '+(bi.git||'?')+' · '+(bi.env||'?');
+  document.getElementById('fwt').textContent=o.target||'?';
+  const fws=document.getElementById('fws');fws.textContent=o.state||'?';fws.style.color=o.state==='staged'?'#4f4':o.state==='error'?'#f44':o.state==='applying'?'#fc3':'#eee';
+  document.getElementById('fwi').textContent=o.state==='staged'?'('+o.lines+' records, '+o.bytes+' bytes, '+o.min+'–'+o.max+', crc32 '+o.crc32+')'+(o.code?' — '+o.code+': '+o.msg:''):o.state==='error'?'('+o.code+': '+o.msg+')':o.state==='applying'?'— copying and rebooting (a few seconds, do not power-cycle); reload this page in ~20 s':'';
+  document.getElementById('fwApply').disabled=o.state!=='staged'||s.moving;
+  document.getElementById('fwDiscard').disabled=s.moving||o.state==='applying'||o.state==='idle';
+  document.getElementById('msg-fw').textContent=lastMsg['fw']||'';
   document.getElementById('msg-net').textContent=lastMsg['net']||'';
   document.getElementById('msg-topo').textContent=lastMsg['topo']||'';
   const tk=document.getElementById('tkind');if(document.activeElement!==tk&&tk.dataset.auto!==s.topology.kind){tk.value=s.topology.kind;tk.dataset.auto=s.topology.kind;renderTopoEditor();}

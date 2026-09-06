@@ -4,8 +4,8 @@
 // of operating the real tuner before the Pi master is deployed
 // (CLAUDE.md "Stack": the master remains the long-term operator UI).
 //
-// Plain HTTP/1.1 on port 80, GET-only, LAN-only, no auth (same posture
-// as LP-100A-Server):
+// Plain HTTP/1.1 on port 80, LAN-only, no auth (same posture as
+// LP-100A-Server). GET verbs plus one POST for firmware upload:
 //
 //   GET /                serves the embedded one-page UI (web_page.h)
 //   GET /api/status      full snapshot as JSON (polled by the page)
@@ -33,9 +33,17 @@
 //   settings[?src=card]              config.json text: live record (default) or
 //                                    the raw file read back from the card
 //   settings_save                    write the card copy now
+//   firmware                         firmware-update status JSON
+//   POST firmware  (body = .hex)     stage a new image in free flash; 200 = staged + CRC
+//   firmware_apply?lines=N           reboot into the staged image (N = staged record count);
+//                                    needs bypass, no motion, no RF
+//   firmware_abort                   discard the staged image (refused while moving)
 //
 // Replies: 200 text on success, 409 "<code>: <msg>" on a refusal,
-// 400 on bad arguments. The page shows the reply on the axis card.
+// 400 on bad arguments (and on a rejected hex file), 408 when a firmware
+// upload stalls, 405 for any method other than GET / POST. The page shows
+// the reply on the axis card. /api/status carries a "build" object (compile
+// time, git revision, env) and the "ota" status object.
 
 #include "app/state.h"
 

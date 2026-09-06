@@ -17,6 +17,7 @@
 #include <cstdint>
 
 #include "app/config.h"
+#include "app/refusal.h"
 #include "app/state.h"
 
 namespace app::motion {
@@ -30,11 +31,8 @@ void init();
 // move-complete, rebuild `out` from HAL state.
 void tick(uint32_t now_ms, Snapshot &out);
 
-// Refusal codes returned alongside a false / Refused result.
-struct Refusal {
-    const char *code;   // "rf_lockout", "bad_axis", "not_anchored", "at_limit", ...
-    const char *msg;
-};
+// Refusal codes returned alongside a false / Refused result (app/refusal.h).
+using app::Refusal;
 
 enum class MoveResult : uint8_t {
     Started,    // running to the requested target
