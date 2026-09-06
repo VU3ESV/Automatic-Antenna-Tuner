@@ -75,23 +75,35 @@ const char *lib_name();
 // Write `n` bytes to a client in chunks of at most kWriteChunk, flushing
 // between chunks. FNET's default per-socket send buffer is 2 KB and
 // NativeEthernet's socketSend() busy-waits forever on a single write of
-// ≥ that size; QNEthernet can return short under lwIP buffer pressure.
-// One loop is correct on both backends. Returns false if the client went
-// away mid-write. Callers must still flush() before stop(): NativeEthernet's
-// stop() discards whatever is left in the send buffer. Bench findings in
+// ≥ that size; QNEthernet can return short under lwIP buffer pressure —
+// or 0 when its send buffer is full, which is back-pressure, not a dead
+// client (its write() services the stack, so a retry sees the peer's
+// ACKs). One loop is correct on both backends: a 0-byte write is retried
+// while the client is connected, for at most kWriteStallMs; on
+// NativeEthernet 0 only happens on a dead socket, which connected() then
+// reports. Returns false if the client went away or stalled mid-write.
+// Callers must still flush() before stop(): NativeEthernet's stop()
+// discards whatever is left in the send buffer. Bench findings in
 // PROPOSAL.md "Bench-test learnings".
-constexpr size_t kWriteChunk = 1024;
+constexpr size_t   kWriteChunk   = 1024;
+constexpr uint32_t kWriteStallMs = 2000;
 
 inline bool write_all(EthernetClient &c, const void *buf, size_t n) {
     const uint8_t *p = static_cast<const uint8_t *>(buf);
-    size_t sent = 0;
+    size_t   sent          = 0;
+    uint32_t last_progress = millis();
     while (sent < n) {
         if (!c.connected()) return false;
         size_t want = n - sent;
         if (want > kWriteChunk) want = kWriteChunk;
         const size_t w = c.write(p + sent, want);
-        if (w == 0) return false;
-        sent += w;
+        if (w == 0) {
+            if (millis() - last_progress > kWriteStallMs) return false;
+            delay(1);
+            continue;
+        }
+        sent         += w;
+        last_progress = millis();
         if (sent < n) c.flush();
     }
     return true;

@@ -2,6 +2,7 @@
 
 #include <cstring>
 
+#include "app/ota.h"
 #include "app/settings.h"
 #include "hal/hal.h"
 
@@ -29,6 +30,17 @@ bool refuse(Refusal &e, const char *code, const char *msg) {
 bool refuse_if_rf(Refusal &e) {
     if (hal::safety::rf_present()) {
         refuse(e, "rf_lockout", "fwd_w exceeds tx_lockout_w");
+        return true;
+    }
+    return false;
+}
+
+// Between an accepted firmware_apply and the reboot (app::ota::tick) no
+// verb may start motion or take the network out of bypass: the reboot
+// would cut a move dead and leave the invariant-3 dirty marker set.
+bool refuse_if_updating(Refusal &e) {
+    if (app::ota::apply_pending()) {
+        refuse(e, "updating", "a firmware update is being applied - the controller is about to reboot");
         return true;
     }
     return false;
@@ -92,6 +104,7 @@ void mark_clean(uint8_t a) {
 // Every bounded move funnels through here so the travel window and the
 // anchoring rule are enforced in exactly one place.
 MoveResult begin_move(uint8_t a, int32_t target, Refusal &e) {
+    if (refuse_if_updating(e)) return MoveResult::Refused;
     if (estop_latched[a]) {
         refuse(e, "estop", "emergency stop latched — release it before moving");
         return MoveResult::Refused;
@@ -350,6 +363,7 @@ bool set_topology(Topology t, Refusal &e) {
 
 bool set_side(Side s, Refusal &e) {
     if (refuse_if_rf(e)) return false;
+    if (refuse_if_updating(e)) return false;
     if (cfg.topology.kind != TopologyKind::BalancedL) {
         return refuse(e, "wrong_topology", "set_side applies to the Balanced L network only");
     }
@@ -358,14 +372,17 @@ bool set_side(Side s, Refusal &e) {
 }
 
 bool set_bypass(bool on, Refusal &e) {
-    (void)e;
     // Invariant: bypass is the only relay verb safe under RF. No lockout check.
+    // Engaging it is always allowed; taking the network out of bypass is
+    // refused while a firmware apply is pending (it must reboot in bypass).
+    if (!on && refuse_if_updating(e)) return false;
     hal::relay::set_bypass(on);
     return true;
 }
 
 bool home(Refusal &e) {
     if (refuse_if_rf(e)) return false;
+    if (refuse_if_updating(e)) return false;
     for (uint8_t i = 0; i < cfg.topology.n; i++) {
         if (!anchored(cfg.topology.elements[i].axis)) {
             return refuse(e, "not_anchored", "declare home on every element before homing");

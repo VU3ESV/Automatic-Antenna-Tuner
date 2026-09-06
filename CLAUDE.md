@@ -42,7 +42,7 @@ Automatic-Antenna-Tuner/
 │   └── HW-T41-PINMAP.md  # Teensy 4.1 pin → V2.09 carrier net mapping (reference)
 ├── firmware/
 │   ├── tuner-controller/  # MCU firmware (C/C++ on Teensy 4.1 or STM32H7); unit tests in test/
-│   ├── lib/               # shared PlatformIO libraries (net_hal, flexpwm_stepper)
+│   ├── lib/               # shared PlatformIO libraries (net_hal, flexpwm_stepper, flasherx)
 │   └── test/              # standalone bench / bring-up projects (selftest, stepper rigs)
 └── master/
     └── tuner-master/      # Go server + embedded web UI, runs on the Pi
@@ -354,6 +354,49 @@ Concretely:
 
 This rule does not apply to the master controller (Pi / Go) — that side
 is platform-stable.
+
+## Firmware update over Ethernet
+
+The tuner controller reflashes itself over its LAN link so the enclosure
+does not have to be opened for a firmware change. Mechanism: the
+vendored **FlasherX** flash layer ([firmware/lib/flasherx](firmware/lib/flasherx),
+public domain) behind `hal::firmware`; policy in
+`firmware/tuner-controller/src/app/ota.cpp`; transport is `POST
+/api/firmware` on the HTTP surface (docs/PROTOCOL.md "Firmware update over
+Ethernet"), driven by `tools/ota_upload.py` / the `*_ota` PlatformIO envs
+or the browser page. Rules a change must keep:
+
+- **Two steps, verified in between.** The hex is staged in free flash above
+  the running program; the controller reports record count, byte range
+  and CRC-32 of what it staged, and applies only on a second command that
+  repeats the record count. The uploader compares the CRC with the file
+  before it applies. An image without the target id (`fw_aat_teensy41` —
+  this project's FlasherX id, so neither a build without the update code
+  nor an unrelated Teensy sketch that links FlasherX is accepted) is
+  refused, so the controller can never flash itself into a state it
+  cannot update from.
+- **Apply only when the tuner is inert:** bypass engaged (invariant 2 holds
+  through the reboot), no axis moving, no RF. The gates are checked when
+  the apply is requested *and again* when the delayed copy comes due —
+  the main loop keeps serving verbs in between — and `app::motion`
+  refuses motion and relay verbs with `updating` while an apply is
+  pending. Uploads, discards and failed transfers erase flash with
+  interrupts masked per sector (the step-counting ISR would miss pulses),
+  so every entry point that can erase is refused while an axis moves.
+  Settings are flushed to the SD card first; position anchors are already
+  in EEPROM.
+- **The staging buffer stays below the EEPROM emulation.** Teensyduino keeps
+  it in the top 256 KB of flash (0x607C0000 on the 4.1); `FLASH_RESERVE` in
+  the vendored header is patched to 64 sectors and `firmware_teensy41.cpp`
+  asserts it. Lowering it would erase the settings and anchors on every
+  update.
+- **USB stays the recovery path.** The PJRC bootloader lives in a separate
+  chip and cannot be touched by self-programming; a bad image or a power
+  loss during the final copy (several seconds — about 134 sector erases
+  for a 270 KB image, interrupts masked throughout) is recovered with
+  `teensy_loader_cli` on the bench. The first install is USB too.
+- Teensy-specific code sits behind `hal::firmware` per the portability rule;
+  the STM32H743 counterpart is its dual-bank flash swap.
 
 ## Stack (locked in)
 

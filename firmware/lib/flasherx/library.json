@@ -1,0 +1,11 @@
+{
+  "name": "flasherx",
+  "version": "1.0.0-aat.1",
+  "description": "FlasherX flash layer (FlashTxx.c/h) by Joe Pasquariello et al., public domain — in-application firmware update for Teensy 4.1: stage a new image in free flash above the running program, verify it, copy it over the program from RAM and reboot. Vendored from github.com/joepasquariello/FlasherX @ 9d5067b with two documented patches (FLASH_RESERVE = 256 KB for the Teensyduino EEPROM emulation; page-sized writes in flash_move). The Intel-HEX parser is NOT vendored — the tuner-controller has its own, unit-tested one in app/ota.cpp.",
+  "keywords": "ota, firmware, flash, teensy",
+  "frameworks": "arduino",
+  "platforms": "teensy",
+  "build": {
+    "srcFilter": ["+<*>"]
+  }
+}

@@ -177,6 +177,7 @@ tests — no MCU needed.
 |--------------------------------------------|-------------------------------------------|
 | `pio run -e teensy41`                      | Compile firmware for Teensy.              |
 | `pio run -e teensy41 -t upload`            | Compile + flash over USB (Teensy Loader). |
+| `pio run -e teensy41_native_ota -t upload` | Compile + flash **over Ethernet** to the running controller (§3.3). |
 | `pio device monitor -e teensy41`           | USB serial console.                       |
 | `pio run -e nucleo_h743zi`                 | Verify STM32 portability builds clean.    |
 | `pio test -e native`                       | Run HAL-independent unit tests on host.   |
@@ -191,9 +192,24 @@ USB-attached Teensy 4.1: hit the on-module program button, then `pio
 run -t upload`. PlatformIO will use `teensy_loader_cli` (installed
 automatically into `~/.platformio/`).
 
-For OTA-flashing once Ethernet is up, use the `TeensyOTA` library or
-the `RemoteFlash` library; M0 sticks to USB-only flashing — OTA is an
-M6 nice-to-have.
+USB is needed for the **first install** of the tuner-controller and for
+recovery. After that the controller reflashes itself over Ethernet:
+
+```sh
+cd firmware/tuner-controller
+pio run -e teensy41_native_ota -t upload                 # board at the address in platformio.ini
+pio run -e teensy41_native_ota -t upload --upload-port 192.168.86.44
+python3 tools/ota_upload.py --host 192.168.86.44 .pio/build/teensy41_native/firmware.hex
+```
+
+The uploader stages the hex on the controller, compares the controller's
+CRC-32 of the staged image with the file, asks it to apply, and prints
+the build stamp the controller runs when it comes back (~20 s). The
+browser page has the same flow under "Firmware update over Ethernet".
+The controller refuses to apply unless bypass is engaged, nothing moves
+and no RF is present, and refuses any image that was not built with the
+update code. Design and rules: CLAUDE.md "Firmware update over Ethernet";
+the vendored flash layer is documented in `firmware/lib/flasherx/README.md`.
 
 ### 3.4 Debugging
 
@@ -377,9 +393,11 @@ A repo-root `Makefile` with `make ci-local` running both is M0 work.
 - **Docker / devcontainer.** Possible later if onboarding gets messier,
   but PlatformIO + Go are both happy native; a container adds friction
   for USB/serial passthrough.
-- **OTA firmware flashing.** USB-only at M0; OTA is an M6 nice-to-have.
-- **STM32H743 hardware in hand.** The `env:nucleo_h743zi` builds clean
-  from M0 even without a board attached; flashing it is Phase 2 work.
+- **STM32H743 hardware in hand.** The `env:nucleo_h743zi` is a structural
+  placeholder that is expected to fail to build until the STM32 `net_hal`
+  backend lands (Phase 2, M5) — see `platformio.ini`; flashing it is
+  Phase 2 work. (Firmware flashing over Ethernet, by contrast, is in
+  since 2026-09-06 — §3.3; first install and recovery stay on USB.)
 
 ## 8. First-day checklist
 

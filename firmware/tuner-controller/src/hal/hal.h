@@ -19,6 +19,8 @@
 //   encoder  passthrough of the motor counter on every target (the iHSS60
 //            has no readable encoder; an external QEI slots in here later)
 //   safety   sim on every target until the AD8307 chain lands (M2)
+//   firmware sim (RAM staging buffer)           | teensy41: FlasherX flash layer
+//                                              |   (firmware/lib/flasherx) — OTA update
 
 #include <cstddef>
 #include <cstdint>
@@ -155,6 +157,27 @@ namespace sdcard {
     bool     present();                                           // card still inserted
     int      read_file(const char *path, char *buf, size_t max);  // bytes read (NUL-terminated), -1 if missing
     bool     write_file(const char *path, const char *data, size_t len);   // atomic replace
+}
+
+namespace firmware {
+    // In-application firmware update (over Ethernet). The new image is
+    // staged in free program flash above the running firmware, verified,
+    // then copied over the program from RAM and the MCU reboots. The
+    // policy (hex parsing, CRC, apply gating) lives in app/ota.cpp; this
+    // is only the flash mechanics. Teensy 4.1: FlasherX flash layer.
+    // STM32H743 (Phase 2): dual-bank swap. Sim: RAM buffer, apply() is
+    // recorded but does nothing.
+    bool        supported();
+    const char *target_id();                 // string the new image must contain ("fw_aat_teensy41")
+    uint32_t    image_base();                // flash address the image starts at (0x60000000)
+    bool        begin(uint32_t &capacity);   // reserve the staging buffer; capacity in bytes
+    bool        write(uint32_t off, const void *data, size_t len);   // stage bytes at image offset `off`
+    bool        read(uint32_t off, void *out, size_t len);           // read staged bytes back (for the CRC)
+    bool        verify(uint32_t image_size); // flush pending writes; target id present in the image
+    void        discard();                   // erase / free the staging buffer. Flash: one sector erase
+                                             // per 4 KB staged, each with interrupts masked (tens of ms;
+                                             // seconds in total) — never call while an axis moves
+    void        apply(uint32_t image_size);  // copy over the program and reboot — does not return on hardware
 }
 
 namespace nvs {
