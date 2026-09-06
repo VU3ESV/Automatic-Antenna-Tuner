@@ -3,19 +3,26 @@
 // ─── ISR dispatch ──────────────────────────────────────────────────────
 // One static instance pointer per FlexPWM submodule we support, plus a
 // thin C-callable trampoline that hands the interrupt back to the right
-// instance. Bench uses two submodules (X→FlexPWM4.2, Y→FlexPWM2.0); add
-// more slots here if Z/M3/M4 are wired up later. Hard-coded rather than
-// a generic array because attachInterruptVector takes a real function
-// pointer, not a thunk-capturing lambda.
+// instance. Bench uses three submodules (X→FlexPWM4.2, Y→FlexPWM2.0,
+// Z→FlexPWM2.2); add more slots here if M3/M4 are wired up later
+// (M3 = pin 8 = FlexPWM1.3). Hard-coded rather than a generic array
+// because attachInterruptVector takes a real function pointer, not a
+// thunk-capturing lambda. FlexPWM2 submodules 0 and 2 have separate
+// IRQ lines (IRQ_FLEXPWM2_0 / IRQ_FLEXPWM2_2), so Y and Z don't share
+// an interrupt even though they share the peripheral.
 
 static FlexPwmStepper *s_isrInstance_FP4_2 = nullptr;
 static FlexPwmStepper *s_isrInstance_FP2_0 = nullptr;
+static FlexPwmStepper *s_isrInstance_FP2_2 = nullptr;
 
 static void isr_flexpwm4_2() {
     if (s_isrInstance_FP4_2) s_isrInstance_FP4_2->handleIsr();
 }
 static void isr_flexpwm2_0() {
     if (s_isrInstance_FP2_0) s_isrInstance_FP2_0->handleIsr();
+}
+static void isr_flexpwm2_2() {
+    if (s_isrInstance_FP2_2) s_isrInstance_FP2_2->handleIsr();
 }
 
 // ─── FlexPwmStepper ────────────────────────────────────────────────────
@@ -49,6 +56,9 @@ void FlexPwmStepper::init() {
     } else if (_pwm == &IMXRT_FLEXPWM2 && _sm == 0) {
         s_isrInstance_FP2_0 = this;
         attachInterruptVector(_irq, isr_flexpwm2_0);
+    } else if (_pwm == &IMXRT_FLEXPWM2 && _sm == 2) {
+        s_isrInstance_FP2_2 = this;
+        attachInterruptVector(_irq, isr_flexpwm2_2);
     } else {
         // Caller passed an (pwm, submodule) pair without an ISR slot.
         // Add it above and to flexpwm_stepper.cpp before using it.
