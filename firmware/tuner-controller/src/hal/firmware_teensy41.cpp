@@ -43,6 +43,11 @@ extern "C" {
 #include "FlashTxx.h"
 }
 
+// Linker symbol (cores/teensy4/imxrt1062_t41.ld): byte length of the
+// running image in flash. Declared at file scope — inside a namespace
+// some GCC versions give it a mangled, internal name and the link fails.
+extern "C" unsigned long _flashimagelen;
+
 namespace hal::firmware {
 
 namespace {
@@ -54,8 +59,6 @@ static_assert(FLASH_BASE_ADDR + FLASH_SIZE - FLASH_RESERVE <= 0x607C0000UL,
               "FlasherX staging buffer would overlap the Teensy 4.1 EEPROM emulation — check FLASH_RESERVE");
 
 constexpr uint32_t kPage = 256;   // W25Q64 program page
-
-extern "C" unsigned long _flashimagelen;   // linker: byte length of the running image in flash
 
 // Erase whatever sits between the program and the reserve so the buffer
 // always starts right above the running image (see begin() above).
