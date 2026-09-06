@@ -18,8 +18,8 @@
 // (FlexPWM-direct vs PIT+ISR) and which pins support which.
 //
 // STEP pin MUST be FlexPWM-capable on a distinct submodule per axis
-// (X→FlexPWM4.2A, Y→FlexPWM2.0A on this bench — see HW-T41-PINMAP.md
-// table in §1). DIR pin is any GPIO. Driver-enable (EN) handling is
+// (X→FlexPWM4.2A, Y→FlexPWM2.0A, Z→FlexPWM2.2A on this bench — see
+// HW-T41-PINMAP.md table in §1). DIR pin is any GPIO. Driver-enable (EN) handling is
 // outside this class — main.cpp keeps the existing release-on-idle
 // behaviour around `ensureDriverReady` / `releaseDriverForIdle`.
 

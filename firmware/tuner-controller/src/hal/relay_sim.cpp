@@ -1,11 +1,8 @@
-// Simulation backend for hal::relay. Three relays in the L-network
-// (CLAUDE.md "RF topology"): K1/K2 select Hi-Z vs Lo-Z (mutually
-// exclusive), K3 latches the network in bypass.
-//
-// The sim is pure state — no settle time, no contact-bounce model.
-// Real implementations gate these behind opto-isolated MOSFETs feeding
-// the HV bias supply, and enforce K1/K2 mutual exclusion in hardware
-// (M1b.2 + M5).
+// Simulation backend for hal::relay (native tests, STM32 placeholder).
+// Pure state — no settle time, no contact-bounce model. The Teensy 4.1
+// build uses relay_teensy41.cpp.
+
+#if !defined(TARGET_TEENSY41)
 
 #include "hal/hal.h"
 
@@ -30,3 +27,5 @@ void set_bypass(bool on) { bypass_engaged = on; }
 bool bypass()            { return bypass_engaged; }
 
 } // namespace hal::relay
+
+#endif // !TARGET_TEENSY41

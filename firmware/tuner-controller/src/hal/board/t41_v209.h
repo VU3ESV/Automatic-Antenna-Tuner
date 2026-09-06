@@ -9,34 +9,36 @@
 // This header is **pin map + signal polarity + driver-electrical
 // defaults only — no logic**. Application code reaches axes and relays
 // through hal::Axis / hal::relay (hal/hal.h) and never sees these pin
-// numbers directly. Real-driver HAL implementations
-// (motor_teensy41.cpp, relay_teensy41.cpp, encoder_teensy41.cpp —
-// landing in M1b.2) translate the axis enum to these constants.
+// numbers directly. The real-driver HAL implementations
+// (motor_teensy41.cpp, relay_teensy41.cpp, limits_teensy41.cpp) translate
+// the axis index to these constants.
 //
-// The bench-test sketch firmware/t41-stepper-test/ also consumes this
+// The bench rig firmware/test/t41-stepper-test/ also consumes this
 // header (via -I in its platformio.ini) so bench and production
 // firmware share a single source of truth for the carrier wiring.
 //
-// Topology mapping per docs/HW-T41-PINMAP.md §7:
-//   L-Match : X = roller inductor (L), Y = vacuum cap (C), Z unused
-//   T-Match : X = series C1,           Y = series C2,      Z = shunt L
-//   Pi-Match: X = shunt C1,            Y = series L,       Z = shunt C2
+// Element → axis mapping is the operator's install-time choice
+// (`set_topology`, persisted by app/config.cpp — CLAUDE.md "Topology vs
+// firmware"). Defaults:
+//   Balanced L : X = inductor pair (L), Y = capacitor (C),     Z spare
+//   Balanced Pi: X = C1,                Y = inductor pair (L), Z = C2
 
 #include <cstdint>
 
 namespace hal::board::t41_v209 {
 
 // ── Per-axis stepper outputs ──────────────────────────────────────────
-// One screw-terminal channel per axis on the carrier. STEP / DIR drive
-// the external stepper driver (TMC2209 / DM542 / TB6600) via opto-
-// isolated inputs. EN is active-LOW on most external drivers — see
-// EN_ACTIVE_LOW below.
+// One screw-terminal channel per axis on the carrier. STEP / DIR / EN
+// drive the external drive's opto-isolated inputs — the JMC iHSS60
+// integrated closed-loop drive in the production build (CLAUDE.md
+// "Hardware contract"), or any STEP/DIR driver on the bench. EN is
+// active-LOW on all of them — see EN_ACTIVE_LOW below.
 
 struct axis_pins_t {
     uint8_t step;
     uint8_t dir;
     uint8_t en;
-    uint8_t limit;  // mechanical home microswitch, opto-isolated
+    uint8_t limit;  // lead-screw home + max switches, NC in series, opto-isolated
 };
 
 constexpr axis_pins_t AXIS_X  = { 2,  3,  10, 20 };
@@ -54,30 +56,27 @@ constexpr uint8_t NUM_AXES_WIRED = 5;
 constexpr uint8_t NUM_AXES_TUNER = 3;  // max under any supported topology
 
 // ── Signal polarity ───────────────────────────────────────────────────
-// External drivers (TMC2209 / DM542 / TB6600) use opto-isolated inputs;
-// energising the opto pulls the input low. For the EN input that means
-// LOW = driver enabled. Confirmed against TB6600 on the bench
-// (PROPOSAL.md "Bench-test learnings"); the production driver-aware HAL
-// should re-confirm per driver model before flipping a high-current
-// axis. Limit switches are wired the same way: opto conducting =
-// switch closed = limit asserted = LOW on the Teensy pin.
+// The drives' STEP / DIR / EN inputs are opto-isolated; energising the
+// opto pulls the input low, so LOW = driver enabled on EN. Confirmed on
+// the bench for TB6600 and iHSS60 (PROPOSAL.md "Bench-test learnings").
+// Limit inputs are wired the same way: opto conducting = LOW = asserted,
+// which with the NC-in-series home + max switches means "a switch has
+// opened — at a limit, or a cable fault". Pulse timing (≥ 2.5 µs per
+// level, DIR setup / hold) is owned by the FlexPWM driver in
+// firmware/lib/flexpwm_stepper/, not by this pin map.
 constexpr bool EN_ACTIVE_LOW    = true;
 constexpr bool LIMIT_ACTIVE_LOW = true;
-
-// Minimum STEP pulse width the external driver will reliably latch.
-// TMC2209 in StealthChop tolerates AccelStepper's 1 µs default, but
-// TB6600 needs ≥ 5 µs (PROPOSAL.md "Bench-test learnings"). 5 µs is
-// safe for both and matches the bench-test setting.
-constexpr uint8_t STEP_MIN_PULSE_US = 5;
 
 // ── Relay-driver outputs ──────────────────────────────────────────────
 // Carrier outputs intended for relay coils. Drive the external
 // vacuum-relay coils via opto-isolated MOSFET stages; the HV bias side
 // is independent. See docs/HW-T41-PINMAP.md §5.
 //
-// K1 / K2 are L-Match-only — the Hi-Z / Lo-Z selector relay pair is
-// unused in the symmetric T / Pi topologies. K3 (bypass) is retained
-// across all topologies per CLAUDE.md invariant 2.
+// K1 / K2 are Balanced-L-only — the Hi-Z / Lo-Z selector relay pair is
+// absent in the Balanced Pi. Every switch is two-pole (both line legs)
+// from one driver output. K3 (bypass) is retained across both
+// topologies per CLAUDE.md invariant 2; hal/relay_teensy41.cpp maps
+// bypass to the de-energised coil state.
 constexpr uint8_t RELAY_K1_HIZ    = 12;  // SPINDLE EN
 constexpr uint8_t RELAY_K2_LOZ    = 11;  // SPINDLE DIR
 constexpr uint8_t RELAY_K3_BYPASS = 19;  // COOLANT FLOOD (latched at power-up)
@@ -93,10 +92,12 @@ constexpr uint8_t INPUT_ENGAGE         = 17;  // CYCLE_START — engage from byp
 constexpr uint8_t INPUT_INTERLOCK      = 29;  // SAFETY_DOOR — enclosure interlock
 
 // ── Quadrature encoder inputs (X axis, mux'd with AUXINPUT1..3) ───────
-// Per CLAUDE.md invariant 3 the encoder is the position truth. The
-// carrier wires QEI A / B / SELECT to dedicated EMI-filtered Schmitt-
-// triggered AUX inputs that double as the QEI pins on the Teensy 4.1
-// silicon. See docs/HW-T41-PINMAP.md §4.
+// Reserved for an external QEI on a non-integrated motor (Phase-2
+// fallback). With the iHSS60 the drive's encoder is internal and the
+// FlexPWM step counter is the position source (CLAUDE.md invariant 3).
+// The carrier wires QEI A / B / SELECT to dedicated EMI-filtered
+// Schmitt-triggered AUX inputs that double as the QEI pins on the
+// Teensy 4.1 silicon. See docs/HW-T41-PINMAP.md §4.
 constexpr uint8_t ENC_X_A     = 30;  // QEI_A
 constexpr uint8_t ENC_X_B     = 34;  // QEI_B
 constexpr uint8_t ENC_X_INDEX = 35;  // QEI_SELECT / Z-pulse

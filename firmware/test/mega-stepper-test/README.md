@@ -56,7 +56,7 @@ change the DIP switches, update `STEPS_PER_REV` in `src/main.cpp`.
 ## Build & upload
 
 ```bash
-cd firmware/mega-stepper-test
+cd firmware/test/mega-stepper-test
 pio run -t upload
 pio device monitor        # 115200 baud
 ```

@@ -15,6 +15,7 @@
 // See docs/ARCHITECTURE.md §5.1.2 for the rationale and pros/cons.
 
 #include <Arduino.h>
+#include <cstddef>
 #include <cstdint>
 
 #if defined(TUNER_NET_QNETHERNET)
@@ -70,5 +71,30 @@ void hw_mac(uint8_t mac[6]);
 
 // Backend identifier for logs / banners ("QNEthernet" / "NativeEthernet").
 const char *lib_name();
+
+// Write `n` bytes to a client in chunks of at most kWriteChunk, flushing
+// between chunks. FNET's default per-socket send buffer is 2 KB and
+// NativeEthernet's socketSend() busy-waits forever on a single write of
+// ≥ that size; QNEthernet can return short under lwIP buffer pressure.
+// One loop is correct on both backends. Returns false if the client went
+// away mid-write. Callers must still flush() before stop(): NativeEthernet's
+// stop() discards whatever is left in the send buffer. Bench findings in
+// PROPOSAL.md "Bench-test learnings".
+constexpr size_t kWriteChunk = 1024;
+
+inline bool write_all(EthernetClient &c, const void *buf, size_t n) {
+    const uint8_t *p = static_cast<const uint8_t *>(buf);
+    size_t sent = 0;
+    while (sent < n) {
+        if (!c.connected()) return false;
+        size_t want = n - sent;
+        if (want > kWriteChunk) want = kWriteChunk;
+        const size_t w = c.write(p + sent, want);
+        if (w == 0) return false;
+        sent += w;
+        if (sent < n) c.flush();
+    }
+    return true;
+}
 
 } // namespace net_hal

@@ -1,0 +1,11 @@
+{
+  "name": "flexpwm_stepper",
+  "version": "0.2.0",
+  "description": "Hardware-timed STEP/DIR stepper driver for Teensy 4.x: one FlexPWM submodule per axis generates the pulse train, the reload ISR counts steps (with the Cortex-M7 dsb double-trigger guard) and stops bounded moves on the exact count. Honors the JMC iHSS60 DIR setup/hold timing. Shared by firmware/tuner-controller (production HAL, hal/motor_teensy41.cpp) and firmware/test/t41-stepper-test (bench rig).",
+  "keywords": "stepper, flexpwm, teensy, ihss60",
+  "frameworks": "arduino",
+  "platforms": "teensy",
+  "build": {
+    "srcFilter": ["+<*>"]
+  }
+}

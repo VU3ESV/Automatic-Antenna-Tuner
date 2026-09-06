@@ -38,6 +38,14 @@ configurable on the master via `[tuner].port`). The master is the only
 expected client; the controller currently accepts up to 4 concurrent
 clients for debug-tool convenience.
 
+**Bring-up control surface (since 2026-09-06).** The controller also
+serves a browser page plus GET verbs on HTTP port 80
+(`firmware/tuner-controller/src/http_server.h` lists the routes). It is
+the initial means of operating the real tuner before the master is
+deployed. Every HTTP verb calls the same `app::motion` entry point as
+the corresponding TCP verb, so the two surfaces cannot disagree; the
+master remains the long-term operator UI.
+
 ## 1. Framing
 
 - Browser↔Master: one WebSocket text frame per protocol frame. No
@@ -114,22 +122,66 @@ connect.
     "bypass": false,
     "last_move": "2026-05-11T09:14:21.998Z",
     "moving": false,
-    "homed": true
+    "homed": true,
+    "topology": "balanced_l",
+    "rf_lockout": false,
+    "estop_all": false,
+    "fwd_w": 0.0,
+    "sd_present": true,
+    "sd_ok": true,
+    "settings_source": "sd",
+    "axes": [
+      {"axis": 0, "name": "L", "type": "L", "pair": true, "steps": 18432, "enc": 18432,
+       "moving": false, "enabled": true, "limit_sw": false, "kind": "inductor",
+       "home_set": true, "anchored": true, "max_rev": 30.0, "max_steps": 192000,
+       "travel": "in_range", "last_clamp": "none", "estop": false, "speed": 6400, "accel": 25600},
+      {"axis": 1, "name": "C", "type": "C", "pair": false, "steps": 9216, "enc": 9216,
+       "moving": false, "enabled": true, "limit_sw": false, "kind": "vacuum_cap",
+       "home_set": true, "anchored": true, "max_rev": 40.0, "max_steps": 256000,
+       "travel": "in_range", "last_clamp": "none", "speed": 6400, "accel": 25600},
+      {"axis": 2, "steps": 0, "enc": 0, "moving": false, "enabled": true, "limit_sw": false,
+       "kind": "unset", "home_set": false, "anchored": false, "max_rev": 0, "max_steps": 0,
+       "travel": "unlimited", "last_clamp": "none", "speed": 800, "accel": 25600}
+    ]
   }
 }
 ```
 
 | Field        | Type    | Notes                                                      |
 |--------------|---------|------------------------------------------------------------|
-| `l_steps`    | uint32  | Commanded L position (microsteps from home).               |
-| `c_steps`    | uint32  | Commanded C position.                                      |
-| `l_enc`      | int32   | Measured L position (encoder counts). Source of truth.     |
+| `l_steps`    | uint32  | **v1 compatibility.** Position of the element named `L` (microsteps from home). |
+| `c_steps`    | uint32  | **v1 compatibility.** Position of element `C` (Balanced L) or `C1` (Balanced Pi). |
+| `l_enc`      | int32   | Measured L position (encoder counts / drive step counter). |
 | `c_enc`      | int32   | Measured C position.                                       |
-| `side`       | enum    | `"hi_z"` \| `"lo_z"`.                                      |
-| `bypass`     | bool    | K3 engaged.                                                |
+| `side`       | enum    | `"hi_z"` \| `"lo_z"`. Meaningful on Balanced L only.       |
+| `bypass`     | bool    | K3 in the bypass position (network out of circuit).        |
 | `last_move`  | string  | ISO-8601 of last completed motion.                         |
-| `moving`     | bool    | True while a stepper is in motion.                         |
-| `homed`      | bool    | False until `home` has run since power-up.                 |
+| `moving`     | bool    | True while any stepper is in motion.                       |
+| `homed`      | bool    | True when every topology-bound axis is **anchored** (home declared and last shutdown clean — invariant 3). |
+| `topology`   | enum    | `"balanced_l"` \| `"balanced_pi"` — the declared network (`set_topology`). |
+| `rf_lockout` | bool    | Forward power above `tx_lockout_w`; motion verbs are being refused. |
+| `estop_all`  | bool    | Every axis has its E-stop alarm latched (what E-STOP ALL produces). Releasing any one axis clears it. |
+| `sd_present` | bool    | microSD card mounted.                                       |
+| `sd_ok`      | bool    | `/tuner/config.json` was read or written successfully.      |
+| `settings_source` | enum | `"sd"` \| `"eeprom"` \| `"defaults"` — where the running settings came from at boot. Settings persist to EEPROM synchronously and to the card (debounced); the card wins for settings at boot, EEPROM always wins for position anchors. |
+| `fwd_w`      | number  | Latest forward-power reading (fake-injectable until the AD8307 chain lands). |
+| `axes[]`     | array   | One entry per carrier stepper channel (0 = X, 1 = Y, 2 = Z), in axis order. |
+
+Per-axis fields (`axes[]`):
+
+| Field        | Type    | Notes                                                      |
+|--------------|---------|------------------------------------------------------------|
+| `axis`       | uint8   | Carrier channel index.                                     |
+| `name` / `type` / `pair` | string / enum / bool | Present only when the topology binds an element to this axis: element name (`L`, `C`, `C1`, `C2`), `"L"` \| `"C"`, inductor-pair flag. |
+| `steps`, `enc` | int32 | Step counter and position source of record.                 |
+| `moving`, `enabled`, `limit_sw` | bool | Pulse train active; driver ENA on; end-stop opto input asserted. |
+| `kind`       | enum    | Element hardware: `unset`, `inductor`, `vacuum_cap`, `varcap_limited`, `varcap_free`, `variometer`. The first three have mechanical stops and get a travel window. |
+| `home_set`, `anchored` | bool | Operator declared home since the kind was set; position trusted (home declared **and** the last power-down happened with no move in flight). |
+| `max_rev`, `max_steps` | number, int32 | Rated travel in element revolutions and the derived window upper bound (0 = no window). |
+| `travel`     | enum    | `unlimited`, `unhomed`, `below_home`, `home`, `in_range`, `max`, `above_max`. |
+| `last_clamp` | enum    | `none`, `home`, `max` — which window bound trimmed the most recent motion verb (the UI's "STOPPED AT MAX" latch). |
+| `estop`      | bool    | Emergency-stop alarm latched on this axis (per-axis `estop`, or `estop_all`). The browser page shows it as a flashing beacon. |
+| `speed`, `accel` | uint32 | Cruise rate (steps/s) and ramp (steps/s²), persisted per axis. |
 
 ### 2.3 `memory`
 
@@ -264,14 +316,25 @@ an `ack`, but with `ref: null`.
 
 | `action`     | `args`                                            | Hop       | Notes                                                |
 |--------------|---------------------------------------------------|-----------|------------------------------------------------------|
-| `move_l`     | `{ "delta_steps": int }` *or* `{ "target_steps": uint }` | controller| Refused if RF present or `bypass:false`.       |
-| `move_c`     | same shape                                        | controller| Same rules.                                           |
+| `move_l`     | `{ "delta_steps": int }` *or* `{ "target_steps": uint }` | controller| **v1 alias** for `move_axis` on element `L`. Balanced L only (`wrong_topology` otherwise). Refused if RF present. |
+| `move_c`     | same shape                                        | controller| **v1 alias** for element `C`. Same rules.             |
+| `move_axis`  | `{ "axis": 0..2 \| "L"\|"C"\|"C1"\|"C2", "delta_steps": int }` *or* `target_steps` | controller | Bounded move on one carrier axis, addressed by index or bound element name. Clamped to the axis' travel window; `at_limit` when already on the bound it points at; `not_anchored` for an axis without a declared home unless `bypass:true` (setup). `delta_steps: ±1` is the fine-tuning single step. |
+| `run`        | `{ "axis": .., "dir": "cw" \| "ccw" }`             | controller| Run to the end of the travel window in that direction (element with stops), or unbounded for a free-rotating element. `kind_unset` / `not_anchored` otherwise. |
+| `stop`       | `{ "axis"?: .. }`                                 | controller| Immediate stop of one axis, or all when `axis` is omitted. Always accepted. No latch. |
+| `estop`      | `{ "axis"?: .. }`                                 | controller| **Emergency stop**: immediate stop **and a latched alarm** on the axis (or every axis when omitted). Latched axes refuse every motion verb with `estop` until released — industrial mushroom-button semantics (the browser page shows the button pressed and toggles it). Relay, home-declaration and configuration verbs stay available. Not persisted across a power cycle. |
+| `estop_reset`| `{ "axis"?: .. }`                                 | controller| Release the alarm on one axis (even one latched by an all-axes `estop`), or on every axis when omitted. |
+| `set_home`   | `{ "axis": .. }`                                  | controller| Declare the current position as home (0): anchors the axis and activates its travel window. |
+| `unset_home` | `{ "axis": .. }`                                  | controller| Forget home: window inactive, axis unanchored.        |
+| `set_element`| `{ "axis": .., "kind": "vacuum_cap" \| 2, "max_rev": 40 }` | controller | Declare the element hardware on the axis and, for kinds with stops, its rated travel in revolutions. A kind change clears home. Persisted. |
+| `set_speed`  | `{ "axis": .., "speed": uint, "accel"?: uint }`    | controller| Cruise steps/s (1..200000) and ramp steps/s². Persisted. |
+| `set_enabled`| `{ "axis": .., "on": bool }`                       | controller| Driver ENA. Off is a setup-only action (turn the element by hand); the position is untrusted until home is re-declared. |
+| `set_topology` | `{ "kind": "balanced_l" \| "balanced_pi", "elements": [ {"name","type","axis","pair"} ] }` | controller | Declare the wired network and the element→axis map (CLAUDE.md "Topology vs firmware"). Requires `bypass:true` and no motion; refused `duplicate_axis` / `bad_axis` / `bad_elements`. Persisted to NVRAM and applied immediately. |
 | `set_side`   | `{ "side": "hi_z" \| "lo_z" }`                     | controller| Refused if RF present. Auto-engages bypass first.    |
 | `set_bypass` | `{ "bypass": bool }` *or* `{ "on": bool }`         | controller| The only relay verb accepted while RF is present.    |
 | `recall`     | `{ "freq_hz": uint }`                             | master    | Master expands into a sequence of controller verbs.  |
 | `save`       | `{ "freq_hz": uint, "label"?: string }`           | master    | Persists current `state` for `(band, bucket)`.       |
 | `auto_tune`  | `{ "freq_hz": uint, "power_w": float }`           | master    | Master orchestrates analytic + hill-climb.           |
-| `home`       | `{}`                                              | controller| Drives both axes to mechanical home.                 |
+| `home`       | `{}`                                              | controller| Drives every topology-bound axis back to its declared home (0). Refused `not_anchored` unless all of them are anchored. (The lead-screw limit-switch homing routine replaces this once the mechanism is fitted.) |
 | `resync`     | `{}`                                              | either    | Server re-emits current `state` + `telemetry`.       |
 | `noop`       | `{}`                                              | either    | Connection check; `ack ok:true` only.                |
 | `set_fwd_w`  | `{ "w": number }`                                 | controller| **Debug.** Injects a synthetic Fwd power reading so the RF-lockout path can be exercised without keying a transmitter. Replaced by real ADC samples once the AD8307 chain lands in M2. |
@@ -298,6 +361,9 @@ handles master-bound verbs locally.
 | Unknown `action` on client→server           | `ack ok:false` with code `unknown_action`; never close.                      |
 | Verb args fail validation                   | `ack ok:false` with code `bad_args`.                                         |
 | Verb refused due to invariant (RF lockout)  | `ack ok:false` with the relevant `code` (e.g. `rf_lockout`).                 |
+| Motion refused by the anchoring / travel rules | `ack ok:false` with `not_anchored`, `at_limit`, `kind_unset`, `bad_axis`. |
+| Motion refused because an E-stop alarm is latched | `ack ok:false` with `estop`; send `estop_reset` first. |
+| Topology / side verbs                       | `ack ok:false` with `wrong_topology`, `not_bypassed`, `moving`, `duplicate_axis`, `bad_axis`, `bad_elements`. |
 | Server overloaded / client too slow         | `status code:ws_overrun`, close with code 1013 (try again later).            |
 | Heartbeat absent for 3× `heartbeat_ms`      | Either side closes; client-side reconnect loop kicks in (1 s→30 s backoff). |
 

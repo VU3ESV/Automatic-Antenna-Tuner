@@ -1,31 +1,41 @@
-// X + Y axis stepper bench-test for Teensy 4.1 in the grblHAL-teensy-4.x V2.09
-// carrier (Phil Barrett).  Tests the L-Match 2-axis path (X = roller
-// inductor, Y = vacuum cap per docs/HW-T41-PINMAP.md §7).
+// X + Y + Z axis stepper bench-test for Teensy 4.1 in the grblHAL-teensy-4.x
+// V2.09 carrier (Phil Barrett).  Three axes cover the Balanced Pi path
+// (C1, L-pair, C2) and, with Z left idle, the Balanced L path (L-pair, C)
+// — see docs/HW-T41-PINMAP.md §7 and CLAUDE.md "RF topology".
 //
-// Drives the carrier's X- and Y-axis STEP / DIR / EN through external stepper
-// drivers (TMC2209 / DM542 / equivalent) → motors, plus monitors the two
-// opto-isolated end-stop inputs (X LIMIT / Y LIMIT).
+// Drives the carrier's X- / Y- / Z-axis STEP / DIR / EN through external
+// stepper drivers (iHSS60 closed-loop, or TMC2209 / DM542 / equivalent) →
+// motors, plus monitors the three opto-isolated end-stop inputs (X / Y / Z
+// LIMIT).
 //
 // Interactive serial menu over USB (115200 baud).  An "active axis" selector
-// (X / Y) decides which axis the motion commands act on.  Both axes run
+// (X / Y / Z) decides which axis the motion commands act on.  All axes run
 // independently — you can leave X spinning in continuous mode and start a
 // jog on Y while X keeps running.
 //
-//   X / Y    Switch active axis (motion commands target the active axis)
+//   X / Y / Z  Switch active axis (motion commands target the active axis)
 //   1 / 2    Active axis: rotate CW / CCW 1 revolution
 //   3 / 4    Active axis: rotate CW / CCW N revolutions (prompted)
-//   5 / 6    Active axis: jog CW / CCW 100 steps (blocking)
+//   5 / 6    Active axis: jog CW / CCW 100 steps
+//   + / -    Active axis: single step CW / CCW (fine tuning)
 //   7 / 8    Active axis: continuous CW / CCW (toggle, prints rev count)
 //   9        Active axis: stop (decelerate)
 //   0        Active axis: emergency stop (immediate)
 //   S / A    Active axis: set speed / acceleration
 //   T        Active axis: toggle ENA pin (test driver polarity)
-//   Z        Active axis: set current position = home (0), save to EEPROM
+//   O        Active axis: set current position = home / origin (0), save
+//            to EEPROM — activates the software travel window (see below)
+//            ('O' because 'Z' now selects the Z axis)
+//   U        Active axis: unset home (travel window inactive until O again)
+//   K        Active axis: set element kind (0 unset, 1 roller inductor,
+//            2 vacuum-variable cap, 3 variable cap with stops, 4 variable
+//            cap free rotation, 5 variometer) + rated travel in revolutions
+//   M        Active axis: set the element's rated travel (max revolutions)
 //   W        Active axis: save current speed + accel to EEPROM (restored at boot)
 //   E / D    Enable / disable ALL axes
 //   Q        Toggle idle auto-release (global, persisted in EEPROM)
 //   N        Print network status (Ethernet backend, link, IP)
-//   ?        Print status (both axes + limits)
+//   ?        Print status (all axes + limits)
 //   H        Print menu
 //
 // Ethernet:
@@ -40,18 +50,49 @@
 //
 // HTTP control surface (when DHCP succeeds):
 //   - http://<dhcp-ip>/  serves a one-page web UI mirroring the Serial
-//     menu (jog ±100, ±1/N revs, continuous CW/CCW, stop, e-stop,
-//     speed/accel + save-speed, enable/disable, idle-release toggle,
-//     set-current-position-as-home).
-//   - JSON status at /api/status (polled by the UI every 500 ms).
-//     Each axis carries rev_job {revs,dir,done,left,state} so the UI can
-//     show rotate-N progress ("12.3 / 40 revs") until the next command.
+//     menu (jog ±1/±10/±100/±N steps, ±1/N revs, run CW/CCW, stop,
+//     e-stop, speed/accel + save-speed, enable/disable, idle-release
+//     toggle, element kind + rated travel, set-current-position-as-home,
+//     unset home).
+//   - JSON status at /api/status (polled by the UI every 1000 ms).
+//     Each axis carries rev_job {revs,eff,dir,done,left,state} so the UI
+//     can show rotate-N progress ("12.3 / 40 revs") until the next
+//     command, and element {kind,limited,max_rev,max_steps,home_set,
+//     travel,last_clamp,turns} for the travel window (see below).
 //   - GET-only verb endpoints under /api/* — same code paths as the
-//     Serial handlers, so HTTP and Serial can never disagree.
+//     Serial handlers (jogSteps / moveRevolutions / startContinuous /
+//     stopAxis / zeroAxis / setElement), so HTTP and Serial can never
+//     disagree.
 //   - LAN-only, no auth (same posture as LP-100A-Server).
-//   - HTTP-issued jog uses a non-blocking variant (no runToPosition)
-//     so the response returns immediately; serviceAxis() ticks the
-//     move forward in the main loop.
+//   - All motion is non-blocking: FlexPWM emits the pulses, the reload
+//     ISR counts them, serviceAxis() does the bookkeeping.
+//
+// Travel window (software hard limits — protects inductors / vacuum caps):
+//   - Each axis declares what it drives (K key / "Set element" in the UI):
+//       0 unset · 1 roller inductor · 2 vacuum-variable capacitor ·
+//       3 variable capacitor with end stops · 4 variable capacitor, free
+//       rotation · 5 variometer, free rotation
+//     plus, for kinds 1–3, the element's rated travel in revolutions.
+//   - Kinds 1–3 have mechanical stops that a mis-step would destroy, so
+//     once the operator has declared home (O / "Set current pos as home")
+//     the firmware keeps a window [0, rated_rev × STEPS_PER_REV] and
+//     clamps every motion verb to it: jog / single step / ±N rev /
+//     continuous ("run to end") all stop exactly on the bound, latch
+//     which bound was hit, and the web UI shows a per-motor
+//     "STOPPED AT HOME / MAX LIMIT" badge. A move that would start at a
+//     bound and head outward is refused (HTTP 409). The position counter
+//     is updated by the ISR for every pulse, single steps included.
+//   - Until home is declared the window is inactive (UI: "HOME NOT SET")
+//     so the operator can jog the element onto its real home stop first;
+//     'U' / "Unset home" deactivates it again for recovery.
+//   - Moves back *into* the window from outside are always allowed.
+//   - Kinds 4–5 and "unset" have no window (position still counts).
+//   - Kind, home-set flag and rated travel persist in EEPROM per axis.
+//     Changing the kind clears home-set (a new device is on the shaft).
+//   - Home is bound 0 exactly: declare it a few steps INSIDE the
+//     physical stop. The lead-screw limit switches (CLAUDE.md
+//     invariant 7) remain the hardware fallback once fitted; this is the
+//     bench prototype of the invariant-7 software soft limits.
 //
 // Persistence (Teensy 4.1 emulated EEPROM, 4 KB, schema v2):
 //   - Per-axis step position is saved on every move-stop and throttled (1 s)
@@ -60,6 +101,12 @@
 //   - Per-axis speed and accel are saved only on explicit request (W key /
 //     "Save spd+acc" button) and restored at boot; defaults 800 steps/s,
 //     25600 steps/s².
+//   - Per-axis element kind, home-set flag and rated travel are saved
+//     whenever they change (K / M / O / U keys, /api/element, /api/zero,
+//     /api/unhome) and restored at boot.
+//   - The Z axis has its own EEPROM block (own magic) appended after the
+//     X/Y records, so boards already in the field keep their saved X/Y
+//     positions, speeds and element settings when this build lands.
 //
 // Motion profile:
 //   - Rotate-N and boot-time homing use a trapezoidal ramp: start at
@@ -78,8 +125,8 @@
 //   - Save 0, continue to menu
 //
 // Limit switches:
-//   - X LIMIT (Teensy pin 20) and Y LIMIT (Teensy pin 21), opto-isolated
-//     inputs on the carrier.  Configured as INPUT_PULLUP.
+//   - X LIMIT (Teensy pin 20), Y LIMIT (pin 21) and Z LIMIT (pin 22),
+//     opto-isolated inputs on the carrier.  Configured as INPUT_PULLUP.
 //   - Active-LOW (opto conducting = switch closed = limit asserted).
 //   - State changes are debounced (~15 ms) and printed to serial.
 //   - Current state is shown in '?' status output.
@@ -99,10 +146,12 @@
 // against either backend. See firmware/lib/net_hal/.
 #include "net_hal.h"
 
-// Hardware-timed stepper driver. Replaces AccelStepper's loop()-polled
-// runSpeed() pattern with FlexPWM-generated pulse trains + ISR step
-// counting so motion is immune to main-loop blocking (HTTP flush/stop,
-// Serial prints, EEPROM writes).
+// Hardware-timed stepper driver (shared library firmware/lib/
+// flexpwm_stepper/, also used by the production tuner-controller HAL).
+// Replaces AccelStepper's loop()-polled runSpeed() pattern with
+// FlexPWM-generated pulse trains + ISR step counting so motion is
+// immune to main-loop blocking (HTTP flush/stop, Serial prints, EEPROM
+// writes).
 #include "flexpwm_stepper.h"
 
 // ── Pin assignments — V2.09 carrier (from docs/HW-T41-PINMAP.md) ────────
@@ -118,8 +167,53 @@ static constexpr uint8_t PIN_Y_DIR   = board::AXIS_Y.dir;
 static constexpr uint8_t PIN_Y_EN    = board::AXIS_Y.en;
 static constexpr uint8_t PIN_Y_LIMIT = board::AXIS_Y.limit;
 
+static constexpr uint8_t PIN_Z_STEP  = board::AXIS_Z.step;
+static constexpr uint8_t PIN_Z_DIR   = board::AXIS_Z.dir;
+static constexpr uint8_t PIN_Z_EN    = board::AXIS_Z.en;
+static constexpr uint8_t PIN_Z_LIMIT = board::AXIS_Z.limit;
+
 // ── Defaults (match your driver's micro-stepping setting) ───────────────
 static const int   STEPS_PER_REV = 6400;   // closed-loop NEMA 24 driver configured for 6400 pulses/rev (1.8° motor, 1/32 equivalent)
+
+// ── Element kinds ───────────────────────────────────────────────────────
+// What is bolted to each motor decides whether the axis has hard
+// mechanical stops. Roller inductors, vacuum-variable capacitors and
+// stop-limited air variables are destroyed by over-travel, so for those
+// the firmware keeps a software travel window [0, maxSteps] anchored at
+// the operator-declared home and clamps every motion verb to it (see
+// clampTarget / beginBoundedMove). Free-rotating air variables and
+// variometers have no stops; no window is enforced. Ids are persisted in
+// EEPROM — append new kinds, never renumber.
+enum ElementKind : uint8_t {
+    EK_UNSET          = 0,   // nothing declared — no window, UI warns
+    EK_INDUCTOR       = 1,   // roller inductor: stops at both ends
+    EK_VACUUM_CAP     = 2,   // vacuum-variable capacitor: stops, fragile bellows
+    EK_VARCAP_LIMITED = 3,   // air variable with end stops (e.g. 180°)
+    EK_VARCAP_FREE    = 4,   // air variable that rotates freely (no stops)
+    EK_VARIOMETER     = 5,   // variometer, rotates freely
+    EK_COUNT
+};
+static const char* const ELEMENT_KIND_NAMES[EK_COUNT] = {
+    "unset", "inductor", "vacuum_cap", "varcap_limited", "varcap_free", "variometer"
+};
+static bool kindHasStops(uint8_t k) {
+    return k == EK_INDUCTOR || k == EK_VACUUM_CAP || k == EK_VARCAP_LIMITED;
+}
+static const char* kindName(uint8_t k) { return k < EK_COUNT ? ELEMENT_KIND_NAMES[k] : "?"; }
+// Accepts a kind id ("2") or name ("vacuum_cap"); -1 if unrecognised.
+static int parseKind(const char* str) {
+    if (!str || !*str) return -1;
+    if (str[0] >= '0' && str[0] <= '9' && str[1] == '\0') {
+        const int k = str[0] - '0';
+        return k < EK_COUNT ? k : -1;
+    }
+    for (int k = 0; k < EK_COUNT; k++)
+        if (strcmp(str, ELEMENT_KIND_NAMES[k]) == 0) return k;
+    return -1;
+}
+// Rated-travel sanity bound (revolutions). 100 000 turns is far beyond
+// any tuner element; it only guards against garbage in EEPROM / a typo.
+static const float MAX_RATED_REV = 100000.0f;
 
 // ── EEPROM layout (schema v2) ───────────────────────────────────────────
 //   0..3   uint32_t magic    (=NVS_MAGIC when our v2 schema is written)
@@ -131,9 +225,26 @@ static const int   STEPS_PER_REV = 6400;   // closed-loop NEMA 24 driver configu
 //   24..27  uint32_t Y saved speed (steps/s)
 //   28..31  uint32_t X saved accel (steps/s²)
 //   32..35  uint32_t Y saved accel (steps/s²)
+//   36..39  uint32_t element-block magic ('ATEL')
+//   40      uint8_t  X element kind (ElementKind)
+//   41      uint8_t  X home-set flag (0/1)
+//   44..47  float    X rated travel, revolutions
+//   48      uint8_t  Y element kind
+//   49      uint8_t  Y home-set flag
+//   52..55  float    Y rated travel, revolutions
+//   56..59  uint32_t Z-axis block magic ('ATZ1')
+//   60..63   int32_t Z position
+//   64..67  uint32_t Z saved speed (steps/s)
+//   68..71  uint32_t Z saved accel (steps/s²)
+//   72      uint8_t  Z element kind
+//   73      uint8_t  Z home-set flag
+//   76..79  float    Z rated travel, revolutions
 // The motion block carries its own magic so adding it did not invalidate
 // the v2 position records already stored on boards in the field; an
-// 'ATSP' block is upgraded in place (accels defaulted, speeds kept).
+// 'ATSP' block is upgraded in place (accels defaulted, speeds kept). The
+// element block likewise has its own magic and defaults to "unset". The
+// Z axis arrived later still and lives in one self-contained block of
+// its own (position + motion + element) behind the 'ATZ1' magic.
 static const int      EE_ADDR_MAGIC       = 0;
 static const int      EE_ADDR_POS_X       = 4;
 static const int      EE_ADDR_POS_Y       = 8;
@@ -143,9 +254,22 @@ static const int      EE_ADDR_SPEED_X     = 20;
 static const int      EE_ADDR_SPEED_Y     = 24;
 static const int      EE_ADDR_ACCEL_X     = 28;
 static const int      EE_ADDR_ACCEL_Y     = 32;
+static const int      EE_ADDR_ELEM_MAGIC  = 36;
+static const int      EE_ADDR_ELEM_X      = 40;   // 8-byte element record per axis
+static const int      EE_ADDR_ELEM_Y      = 48;
+static const int      ELEM_OFF_KIND       = 0;    // offsets inside an element record
+static const int      ELEM_OFF_HOMESET    = 1;
+static const int      ELEM_OFF_MAXREV     = 4;
+static const int      EE_ADDR_Z_MAGIC     = 56;   // Z-axis block: pos + speed + accel + element
+static const int      EE_ADDR_POS_Z       = 60;
+static const int      EE_ADDR_SPEED_Z     = 64;
+static const int      EE_ADDR_ACCEL_Z     = 68;
+static const int      EE_ADDR_ELEM_Z      = 72;
 static const uint32_t NVS_MAGIC_V2        = 0x41544132UL;  // 'ATA2' — recognises v2 schema
 static const uint32_t NVS_SPEED_MAGIC     = 0x41545350UL;  // 'ATSP' — motion block v1 (speeds)
 static const uint32_t NVS_MOTION_MAGIC    = 0x41545332UL;  // 'ATS2' — motion block v2 (+accels)
+static const uint32_t NVS_ELEM_MAGIC      = 0x4154454CUL;  // 'ATEL' — element block v1
+static const uint32_t NVS_Z_MAGIC         = 0x41545A31UL;  // 'ATZ1' — Z-axis block v1
 static const uint32_t DEFAULT_SPEED_HZ    = 800;           // when nothing has been saved
 static const uint32_t DEFAULT_ACCEL_HZ2   = 25600;         // steps/s² — 0→25600 steps/s in 1 s
 
@@ -164,6 +288,7 @@ struct Axis {
     int               ee_pos_addr;
     int               ee_speed_addr;
     int               ee_accel_addr;
+    int               ee_elem_addr;
     FlexPwmStepper    stepper;
 
     // Position-persistence state
@@ -210,25 +335,40 @@ struct Axis {
     long              revJobStartPos  = 0;
     long              revJobTargetPos = 0;
 
+    // Element / travel-window configuration (persisted — see EEPROM layout).
+    // The window [0, maxSteps] is enforced only while kindHasStops(kind)
+    // && homeSet (see limitsActive). lastClamp latches which bound the
+    // most recent motion verb ran into (-1 home / +1 max / 0 none) so the
+    // UI can show "STOPPED AT MAX" until the next command replaces it.
+    uint8_t           kind            = EK_UNSET;
+    bool              homeSet         = false;
+    float             maxRev          = 0.0f;     // rated travel, element revolutions
+    long              maxSteps        = 0;        // derived: lroundf(maxRev × STEPS_PER_REV)
+    int8_t            lastClamp       = 0;
+
     Axis(const char* n, uint8_t s, uint8_t d, uint8_t e, uint8_t l,
-         int ee_addr, int ee_spd_addr, int ee_acc_addr,
+         int ee_addr, int ee_spd_addr, int ee_acc_addr, int ee_el_addr,
          IMXRT_FLEXPWM_t* pwm, uint8_t submodule, IRQ_NUMBER_t irq)
         : name(n), pin_step(s), pin_dir(d), pin_en(e), pin_limit(l),
           ee_pos_addr(ee_addr), ee_speed_addr(ee_spd_addr), ee_accel_addr(ee_acc_addr),
+          ee_elem_addr(ee_el_addr),
           stepper(s, d, pwm, submodule, irq) {}
 };
 
 // FlexPWM submodule assignment per axis — see docs/HW-T41-PINMAP.md §1.
 // Pin 2 (X STEP) is FlexPWM4 submodule 2; pin 4 (Y STEP) is FlexPWM2
-// submodule 0. Different peripherals → independent step trains, no
-// contention. If you ever wire Z/M3/M4 STEP pins, add the right
+// submodule 0; pin 6 (Z STEP) is FlexPWM2 submodule 2. Each submodule
+// has its own counter and IRQ line → independent step trains, no
+// contention. If you ever wire M3/M4 STEP pins, add the right
 // (pwm, submodule, irq) triple here AND a dispatch slot in
 // flexpwm_stepper.cpp.
 static Axis xAxis("X", PIN_X_STEP, PIN_X_DIR, PIN_X_EN, PIN_X_LIMIT, EE_ADDR_POS_X, EE_ADDR_SPEED_X, EE_ADDR_ACCEL_X,
-                  &IMXRT_FLEXPWM4, 2, IRQ_FLEXPWM4_2);
+                  EE_ADDR_ELEM_X, &IMXRT_FLEXPWM4, 2, IRQ_FLEXPWM4_2);
 static Axis yAxis("Y", PIN_Y_STEP, PIN_Y_DIR, PIN_Y_EN, PIN_Y_LIMIT, EE_ADDR_POS_Y, EE_ADDR_SPEED_Y, EE_ADDR_ACCEL_Y,
-                  &IMXRT_FLEXPWM2, 0, IRQ_FLEXPWM2_0);
-static Axis* const axes[] = { &xAxis, &yAxis };
+                  EE_ADDR_ELEM_Y, &IMXRT_FLEXPWM2, 0, IRQ_FLEXPWM2_0);
+static Axis zAxis("Z", PIN_Z_STEP, PIN_Z_DIR, PIN_Z_EN, PIN_Z_LIMIT, EE_ADDR_POS_Z, EE_ADDR_SPEED_Z, EE_ADDR_ACCEL_Z,
+                  EE_ADDR_ELEM_Z, &IMXRT_FLEXPWM2, 2, IRQ_FLEXPWM2_2);
+static Axis* const axes[] = { &xAxis, &yAxis, &zAxis };
 static const int NUM_AXES = sizeof(axes) / sizeof(axes[0]);
 static Axis* selected = &xAxis;
 
@@ -344,6 +484,70 @@ static void saveSpeed(Axis& a) {
     Serial.print(F("] saved to EEPROM: speed ")); Serial.print(v);
     Serial.print(F(" steps/s, accel ")); Serial.print(acc);
     Serial.println(F(" steps/s² (restored at boot)"));
+}
+
+// ── Element block: kind + home-set + rated travel (own magic) ────────────
+static void nvsInitElement() {
+    uint32_t magic = 0;
+    EEPROM.get(EE_ADDR_ELEM_MAGIC, magic);
+    if (magic == NVS_ELEM_MAGIC) return;
+    const uint8_t z8 = 0;
+    const float   z32 = 0.0f;
+    const int bases[] = { EE_ADDR_ELEM_X, EE_ADDR_ELEM_Y };
+    for (int base : bases) {
+        EEPROM.put(base + ELEM_OFF_KIND,    z8);
+        EEPROM.put(base + ELEM_OFF_HOMESET, z8);
+        EEPROM.put(base + ELEM_OFF_MAXREV,  z32);
+    }
+    EEPROM.put(EE_ADDR_ELEM_MAGIC, NVS_ELEM_MAGIC);
+    Serial.println(F("EEPROM: initialised element block (kind = unset, no travel window)."));
+}
+
+// maxSteps is derived, never stored: recompute after any change to
+// kind / maxRev so the two can't drift apart.
+static void applyMaxSteps(Axis& a) {
+    a.maxSteps = (kindHasStops(a.kind) && a.maxRev > 0.0f)
+               ? lroundf(a.maxRev * (float)STEPS_PER_REV) : 0;
+}
+
+static void nvsLoadElement(Axis& a) {
+    uint8_t k = 0, h = 0;
+    float   mr = 0.0f;
+    EEPROM.get(a.ee_elem_addr + ELEM_OFF_KIND,    k);
+    EEPROM.get(a.ee_elem_addr + ELEM_OFF_HOMESET, h);
+    EEPROM.get(a.ee_elem_addr + ELEM_OFF_MAXREV,  mr);
+    a.kind    = (k < EK_COUNT) ? k : (uint8_t)EK_UNSET;
+    a.homeSet = h != 0;
+    a.maxRev  = (mr > 0.0f && mr < MAX_RATED_REV) ? mr : 0.0f;   // NaN / garbage → 0
+    applyMaxSteps(a);
+}
+
+static void nvsSaveElement(const Axis& a) {
+    const uint8_t h = a.homeSet ? 1 : 0;
+    EEPROM.put(a.ee_elem_addr + ELEM_OFF_KIND,    a.kind);
+    EEPROM.put(a.ee_elem_addr + ELEM_OFF_HOMESET, h);
+    EEPROM.put(a.ee_elem_addr + ELEM_OFF_MAXREV,  a.maxRev);
+}
+
+// ── Z-axis block: position + speed + accel + element, one magic ──────────
+// Added after the X/Y layout was already in the field; a self-contained
+// block means an old board picks up Z with clean defaults and keeps all
+// of its X/Y records untouched.
+static void nvsInitAxisZ() {
+    uint32_t magic = 0;
+    EEPROM.get(EE_ADDR_Z_MAGIC, magic);
+    if (magic == NVS_Z_MAGIC) return;
+    const int32_t zero = 0;
+    const uint8_t z8   = 0;
+    const float   z32  = 0.0f;
+    EEPROM.put(EE_ADDR_POS_Z,   zero);
+    EEPROM.put(EE_ADDR_SPEED_Z, DEFAULT_SPEED_HZ);
+    EEPROM.put(EE_ADDR_ACCEL_Z, DEFAULT_ACCEL_HZ2);
+    EEPROM.put(EE_ADDR_ELEM_Z + ELEM_OFF_KIND,    z8);
+    EEPROM.put(EE_ADDR_ELEM_Z + ELEM_OFF_HOMESET, z8);
+    EEPROM.put(EE_ADDR_ELEM_Z + ELEM_OFF_MAXREV,  z32);
+    EEPROM.put(EE_ADDR_Z_MAGIC, NVS_Z_MAGIC);
+    Serial.println(F("EEPROM: initialised Z-axis block (pos 0, 800 steps/s, 25600 steps/s², element unset)."));
 }
 
 // ── Per-axis helpers ────────────────────────────────────────────────────
@@ -467,21 +671,233 @@ static void serviceRamp(Axis& a) {
     a.rampSpeed = v;
 }
 
-static void moveRevolutions(Axis& a, int n, int dir) {
+// ── Software travel window ──────────────────────────────────────────────
+
+// The window is enforced only when the element has stops AND the
+// operator has declared home since the kind was set. Before that the
+// axis is free so the operator can jog it onto the real home stop.
+static bool limitsActive(const Axis& a) {
+    return kindHasStops(a.kind) && a.homeSet && a.maxSteps > 0;
+}
+
+// Clamp a requested absolute target into [0, maxSteps]. `hit` reports
+// which bound trimmed it (-1 home, +1 max, 0 none). A move that heads
+// back *into* the window from outside is always allowed, so an axis
+// whose window was tightened after the fact can still be recovered.
+static long clampTarget(const Axis& a, long target, int& hit) {
+    hit = 0;
+    if (!limitsActive(a)) return target;
+    const long pos = a.stepper.position();
+    if (target > a.maxSteps && target > pos) { hit = +1; return pos > a.maxSteps ? pos : a.maxSteps; }
+    if (target < 0          && target < pos) { hit = -1; return pos < 0 ? pos : 0; }
+    return target;
+}
+
+// Where the axis sits relative to its window (status JSON / UI).
+static const char* travelState(const Axis& a) {
+    if (!kindHasStops(a.kind) || a.maxSteps <= 0) return "unlimited";
+    if (!a.homeSet) return "unhomed";
+    const long p = a.stepper.position();
+    if (p < 0)           return "below_home";
+    if (p == 0)          return "home";
+    if (p < a.maxSteps)  return "in_range";
+    if (p == a.maxSteps) return "max";
+    return "above_max";
+}
+
+static const char* clampName(int hit) { return hit > 0 ? "max" : (hit < 0 ? "home" : "none"); }
+
+// A target far outside any plausible window; clampTarget turns it into
+// "the bound in that direction" for run-to-end moves. `long` is 32-bit
+// on Cortex-M, so stay well inside it.
+static const long FAR_AWAY_STEPS = 1000000000L;
+
+// ── Motion verbs (shared by Serial + HTTP) ──────────────────────────────
+
+enum MoveResult {
+    MOVE_STARTED,    // running to the requested target
+    MOVE_CLAMPED,    // running, but the target was trimmed to a bound
+    MOVE_AT_LIMIT,   // refused: already on the bound the move points at
+    MOVE_DISABLED,   // refused: motors disabled
+    MOVE_NOOP        // nothing to do (target == position)
+};
+
+// Every bounded move funnels through here so the travel window is
+// enforced in exactly one place. `out_target` receives the target
+// actually programmed. Trapezoidal ramp for every size of move; a
+// single step is one pulse at RAMP_MIN_SPEED (or slower if the axis
+// speed is set lower).
+static MoveResult beginBoundedMove(Axis& a, long target, long& out_target) {
+    out_target = a.stepper.position();
     if (!motorEnabled) {
         Serial.println(F("Motors disabled — enable first (E)."));
-        return;
+        return MOVE_DISABLED;
     }
     cancelHoming(a);
+    a.continuousMode = false;
+    int hit = 0;
+    const long tgt = clampTarget(a, target, hit);
+    a.lastClamp = (int8_t)hit;
+    out_target  = tgt;
+    if (tgt == a.stepper.position()) {
+        if (hit) {
+            Serial.print(F("[")); Serial.print(a.name);
+            Serial.print(F("] REFUSED: already at ")); Serial.print(clampName(hit));
+            Serial.println(F(" limit."));
+            return MOVE_AT_LIMIT;
+        }
+        return MOVE_NOOP;
+    }
     ensureDriverReady(a);
-    long target = a.stepper.position() + (long)dir * n * STEPS_PER_REV;
-    a.revJobRevs      = n;
-    a.revJobDir       = dir > 0 ? +1 : -1;
-    a.revJobStartPos  = a.stepper.position();
-    a.revJobTargetPos = target;
     Serial.print(F("[")); Serial.print(a.name);
-    Serial.print(F("] moving to ")); Serial.print(target); Serial.println(F(" steps … (ramped)"));
-    startRampedMove(a, target);
+    Serial.print(F("] moving to ")); Serial.print(tgt); Serial.print(F(" steps (ramped)"));
+    if (hit) {
+        Serial.print(F(" — requested ")); Serial.print(target);
+        Serial.print(F(", clamped at ")); Serial.print(clampName(hit)); Serial.print(F(" limit"));
+    }
+    Serial.println();
+    startRampedMove(a, tgt);
+    a.lastMotionMs = millis();
+    a.wasRunning   = true;
+    return hit ? MOVE_CLAMPED : MOVE_STARTED;
+}
+
+// Relative jog of n signed steps: ±1 for fine tuning, ±100 classic jog,
+// or any operator-entered count. Clamped to the travel window.
+static MoveResult jogSteps(Axis& a, long n) {
+    clearRevJob(a);
+    long tgt;
+    return beginBoundedMove(a, a.stepper.position() + n, tgt);
+}
+
+// Rotate n revolutions in `dir`. The rev-job progress records both the
+// requested count and the target actually reachable inside the window.
+static MoveResult moveRevolutions(Axis& a, int n, int dir) {
+    const long start = a.stepper.position();
+    long tgt;
+    const MoveResult r = beginBoundedMove(a, start + (long)dir * n * STEPS_PER_REV, tgt);
+    if (r == MOVE_STARTED || r == MOVE_CLAMPED) {
+        a.revJobRevs      = n;
+        a.revJobDir       = dir > 0 ? +1 : -1;
+        a.revJobStartPos  = start;
+        a.revJobTargetPos = tgt;
+    }
+    return r;
+}
+
+// Continuous run. On an axis with an active travel window this is a
+// bounded run to the end of the window in that direction — the motor
+// stops on the bound and the UI shows which one. Otherwise the classic
+// unbounded pulse train.
+static MoveResult startContinuous(Axis& a, int dir) {
+    if (limitsActive(a)) {
+        clearRevJob(a);
+        long tgt;
+        return beginBoundedMove(a, dir > 0 ? FAR_AWAY_STEPS : -FAR_AWAY_STEPS, tgt);
+    }
+    if (!motorEnabled) {
+        Serial.println(F("Motors disabled — enable first (E)."));
+        return MOVE_DISABLED;
+    }
+    cancelHoming(a);
+    clearRevJob(a);
+    ensureDriverReady(a);
+    a.lastClamp       = 0;
+    a.continuousMode  = true;
+    a.continuousDir   = dir > 0 ? +1 : -1;
+    a.lastReportedRev = a.stepper.position() / STEPS_PER_REV;
+    a.lastContSaveMs  = millis();
+    a.stepper.setSpeed((uint32_t)a.currentSpeed);
+    a.stepper.runContinuous(a.continuousDir);
+    Serial.print(F("[")); Serial.print(a.name);
+    Serial.println(dir > 0 ? F("] continuous CW started.") : F("] continuous CCW started."));
+    return MOVE_STARTED;
+}
+
+// FlexPWM is constant-velocity between ramp ticks, so stop() is
+// immediate: "Stop" and "E-STOP" share this. Position is preserved.
+static void stopAxis(Axis& a, const __FlashStringHelper* why) {
+    cancelHoming(a);
+    a.continuousMode = false;
+    a.stepper.stop();
+    Serial.print(F("[")); Serial.print(a.name); Serial.print(F("] ")); Serial.println(why);
+}
+
+// Serial 7/8 toggle: a second press in the same direction stops.
+static void toggleContinuous(Axis& a, int dir) {
+    const bool runningThisWay = a.continuousMode
+        ? (a.continuousDir == dir)
+        : (a.stepper.isRunning() && limitsActive(a) && a.lastClamp == dir);
+    if (runningThisWay) {
+        stopAxis(a, dir > 0 ? F("continuous CW stopped.") : F("continuous CCW stopped."));
+        return;
+    }
+    startContinuous(a, dir);
+}
+
+// Declare the current position as home (0). Activates the travel
+// window for elements with stops. Declare home a few steps *inside* the
+// physical stop — the window bound is exactly 0.
+static void zeroAxis(Axis& a) {
+    cancelHoming(a);
+    clearRevJob(a);
+    a.stepper.stop();
+    a.continuousMode = false;
+    a.stepper.setPosition(0);
+    a.lastClamp = 0;
+    a.homeSet   = true;
+    nvsSaveElement(a);
+    savePositionIfChanged(a);
+    Serial.print(F("[")); Serial.print(a.name);
+    Serial.print(F("] position zeroed (declared home)"));
+    if (limitsActive(a)) {
+        Serial.print(F(" — travel window 0 .. ")); Serial.print(a.maxSteps); Serial.print(F(" steps ACTIVE"));
+    } else if (kindHasStops(a.kind)) {
+        Serial.print(F(" — set the rated travel (M) to activate the window"));
+    }
+    Serial.println(F("."));
+}
+
+// Forget home: the travel window is inactive until Z is pressed again.
+// Lets the operator jog past the software 0 to find the real stop.
+static void unsetHome(Axis& a) {
+    a.homeSet   = false;
+    a.lastClamp = 0;
+    nvsSaveElement(a);
+    Serial.print(F("[")); Serial.print(a.name);
+    Serial.println(F("] home unset — travel window INACTIVE, jog with care."));
+}
+
+static void printElement(const Axis& a) {
+    Serial.print(F("[")); Serial.print(a.name);
+    Serial.print(F("] element: ")); Serial.print(kindName(a.kind));
+    if (kindHasStops(a.kind)) {
+        Serial.print(F(", rated travel ")); Serial.print(a.maxRev, 3);
+        Serial.print(F(" rev = ")); Serial.print(a.maxSteps); Serial.print(F(" steps, home "));
+        Serial.print(a.homeSet ? F("SET") : F("NOT SET"));
+        Serial.println(limitsActive(a) ? F(" — window ACTIVE.")
+                                       : F(" — window inactive (set home with O)."));
+    } else {
+        Serial.println(F(" — no stops, travel unlimited."));
+    }
+}
+
+// Declare what the motor drives and, for kinds with stops, its rated
+// travel in element revolutions. A kind change means a new device is on
+// the shaft, so home has to be declared again. Stops the axis first.
+static bool setElement(Axis& a, uint8_t kind, float maxRev) {
+    if (kind >= EK_COUNT) return false;
+    if (kindHasStops(kind) && !(maxRev > 0.0f && maxRev < MAX_RATED_REV)) return false;
+    if (a.stepper.isRunning() || a.continuousMode) stopAxis(a, F("stopped for element change."));
+    clearRevJob(a);
+    if (kind != a.kind) a.homeSet = false;
+    a.kind      = kind;
+    a.maxRev    = kindHasStops(kind) ? maxRev : 0.0f;
+    a.lastClamp = 0;
+    applyMaxSteps(a);
+    nvsSaveElement(a);
+    printElement(a);
+    return true;
 }
 
 // Non-blocking: kick off a homing move to 0 and return immediately.
@@ -575,6 +991,16 @@ static void serviceAxis(Axis& a) {
     if (a.wasRunning && !nowRunning) {
         savePositionIfChanged(a);
         a.lastMotionMs = millis();
+        // Travel-window indication: the last verb was trimmed to a bound
+        // and the axis has now landed exactly on it.
+        if (a.lastClamp != 0 && limitsActive(a)) {
+            const long bound = a.lastClamp > 0 ? a.maxSteps : 0;
+            if (a.stepper.position() == bound) {
+                Serial.print(F("[")); Serial.print(a.name);
+                Serial.print(F("] STOPPED AT ")); Serial.print(a.lastClamp > 0 ? F("MAX") : F("HOME"));
+                Serial.print(F(" LIMIT (")); Serial.print(bound); Serial.println(F(" steps)."));
+            }
+        }
     }
     a.wasRunning = nowRunning;
 
@@ -605,6 +1031,18 @@ static void printStatus() {
         else                  Serial.println(F("OFF"));
         Serial.print(F("  limit input : "));
         Serial.println(a.limitLastState == LOW ? F("ASSERTED (LOW)") : F("released (HIGH)"));
+        Serial.print(F("  element     : ")); Serial.print(kindName(a.kind));
+        if (kindHasStops(a.kind)) {
+            Serial.print(F(", rated ")); Serial.print(a.maxRev, 3);
+            Serial.print(F(" rev (")); Serial.print(a.maxSteps);
+            Serial.print(F(" steps), home ")); Serial.print(a.homeSet ? F("SET") : F("NOT SET"));
+        }
+        Serial.println();
+        Serial.print(F("  travel      : ")); Serial.print(travelState(a));
+        Serial.print(F(" (")); Serial.print((float)a.stepper.position() / (float)STEPS_PER_REV, 3);
+        Serial.print(F(" rev)"));
+        if (a.lastClamp) { Serial.print(F(", last move bounded by ")); Serial.print(clampName(a.lastClamp)); Serial.print(F(" limit")); }
+        Serial.println();
         Serial.print(F("  rotate job  : "));
         if (a.revJobRevs > 0) {
             float jdone, jleft; const char *jdir, *jstate;
@@ -622,19 +1060,23 @@ static void printStatus() {
 
 static void printMenu() {
     Serial.println();
-    Serial.println(F("=== T41 X/Y Stepper Test Menu ==="));
+    Serial.println(F("=== T41 X/Y/Z Stepper Test Menu ==="));
     Serial.print  (F("(active axis: ")); Serial.print(selected->name); Serial.println(F(")"));
-    Serial.println(F("  X / Y  Switch active axis"));
+    Serial.println(F("  X/Y/Z  Switch active axis"));
     Serial.println(F("  1 / 2  Rotate CW / CCW 1 revolution"));
     Serial.println(F("  3 / 4  Rotate CW / CCW N revolutions (prompted)"));
-    Serial.println(F("  5 / 6  Jog CW / CCW 100 steps (blocking)"));
+    Serial.println(F("  5 / 6  Jog CW / CCW 100 steps"));
+    Serial.println(F("  + / -  Single step CW / CCW (fine tuning)"));
     Serial.println(F("  7 / 8  Continuous CW / CCW (toggle)"));
     Serial.println(F("  9      Stop (decelerate)"));
     Serial.println(F("  0      EMERGENCY STOP (immediate)"));
     Serial.println(F("  S / A  Set speed / acceleration"));
     Serial.println(F("  W      Save current speed + accel to EEPROM (restored at boot)"));
     Serial.println(F("  T      Toggle ENA pin (test driver polarity)"));
-    Serial.println(F("  Z      Set position = home (0), save to EEPROM"));
+    Serial.println(F("  O      Set position = home / origin (0), save to EEPROM — activates travel window"));
+    Serial.println(F("  U      Unset home (travel window inactive until O)"));
+    Serial.println(F("  K      Set element kind: 0 unset 1 inductor 2 vacuum cap 3 varcap w/ stops 4 varcap free 5 variometer"));
+    Serial.println(F("  M      Set element rated travel (max revolutions)"));
     Serial.println(F("  E / D  Enable / disable all motors"));
     Serial.println(F("  Q      Toggle idle auto-release (global, persisted)"));
     Serial.println(F("  N      Print network status (backend, link, IP)"));
@@ -657,7 +1099,7 @@ static float readFloatFromSerial() {
     while (!Serial.available()) { /* wait */ }
     float val = Serial.parseFloat();
     while (Serial.available()) Serial.read();
-    Serial.println(val, 1);
+    Serial.println(val, 3);
     return val;
 }
 
@@ -730,16 +1172,17 @@ static const char INDEX_HTML[] =
 R"HTML(<!doctype html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>T41 Bench — X/Y stepper</title>
+<title>T41 Bench — X/Y/Z stepper</title>
 <style>
 *{box-sizing:border-box}
 body{font-family:ui-monospace,Menlo,monospace;background:#111;color:#eee;margin:0;padding:1em;line-height:1.4}
 h1{margin:0 0 .25em;font-weight:300;font-size:1.4em}
 h2{margin:0 0 .35em;font-weight:300;font-size:1.1em}
-.bar{color:#888;font-size:.85em;margin-bottom:1em}
-.bar b{color:#eee}
+.top{color:#888;font-size:.85em;margin-bottom:1em}
+.top b{color:#eee}
 .axis{border:1px solid #333;padding:.8em 1em;margin:.6em 0;border-radius:8px;background:#1a1a1a}
 .axis.active{border-color:#4f4}
+.axis.atlimit{border-color:#f44}
 .row{display:flex;flex-wrap:wrap;gap:.4em;align-items:center;margin:.4em 0}
 button{background:#2a2a2a;color:#eee;border:1px solid #555;padding:.45em .9em;border-radius:4px;cursor:pointer;font-family:inherit;font-size:.9em}
 button:hover{background:#3a3a3a}
@@ -747,24 +1190,33 @@ button.danger{background:#502020;border-color:#933}
 button.danger:hover{background:#702828}
 button.go{background:#1c3a1c;border-color:#494}
 button.go:hover{background:#264826}
-input[type=number]{background:#222;color:#eee;border:1px solid #555;padding:.4em;border-radius:4px;width:7em;font-size:1em;font-family:inherit}
+input[type=number],select{background:#222;color:#eee;border:1px solid #555;padding:.4em;border-radius:4px;width:7em;font-size:1em;font-family:inherit}
+select{width:auto}
 .kv{font-size:.85em;color:#aaa}
 .kv b{color:#eee}
 .la{color:#f44;font-weight:bold}
 .lr{color:#4f4}
 .sep{color:#555;margin:0 .4em}
-.hom{display:none;color:#000;background:#fc3;padding:.1em .55em;border-radius:.4em;font-size:.7em;margin-left:.5em;vertical-align:middle;font-weight:bold;animation:pulse 1s ease-in-out infinite}
-.hom.on{display:inline-block}
+.bdg{display:none;color:#000;padding:.1em .55em;border-radius:.4em;font-size:.7em;margin-left:.5em;vertical-align:middle;font-weight:bold}
+.bdg.on{display:inline-block}
+.bdg.hom{background:#fc3;animation:pulse 1s ease-in-out infinite}
+.bdg.warn{background:#fc3}
+.bdg.red{background:#f44;color:#fff;animation:pulse 1s ease-in-out infinite}
+.bdg.run{background:#48c;color:#fff}
+.bdg.dim{background:#555;color:#ddd}
 .job{margin:.35em 0 .5em}
-.bar{height:8px;background:#222;border:1px solid #444;border-radius:4px;margin-top:.3em;overflow:hidden}
+.pbar{height:8px;background:#222;border:1px solid #444;border-radius:4px;margin-top:.3em;overflow:hidden}
 .fill{height:100%;width:0;background:#48c;transition:width .6s linear}
 .fill.done{background:#4f4}
 .fill.stopped{background:#c93}
+.tfill{height:100%;width:0;background:#4a8;transition:width .6s linear}
+.tfill.edge{background:#f44}
+.msg{font-size:.8em;color:#fc3;min-height:1.2em}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.55}}
 </style></head>
 <body>
-<h1>T41 Bench — X/Y stepper</h1>
-<div class="bar">backend <b id="be">?</b> <span class="sep">·</span> ip <b id="ip">?</b> <span class="sep">·</span> link <b id="ln">?</b> <span class="sep">·</span> motors <b id="me">?</b> <span class="sep">·</span> idle-release <b id="ir">?</b></div>
+<h1>T41 Bench — X/Y/Z stepper</h1>
+<div class="top">backend <b id="be">?</b> <span class="sep">·</span> ip <b id="ip">?</b> <span class="sep">·</span> link <b id="ln">?</b> <span class="sep">·</span> motors <b id="me">?</b> <span class="sep">·</span> idle-release <b id="ir">?</b></div>
 
 <div id="axes"></div>
 
@@ -776,26 +1228,30 @@ input[type=number]{background:#222;color:#eee;border:1px solid #555;padding:.4em
 </div>
 
 <script>
-async function cmd(u){try{await fetch(u);await poll();}catch(e){}}
+const KINDS=[['unset','— not set —'],['inductor','Roller inductor (stops)'],['vacuum_cap','Vacuum variable cap (stops)'],['varcap_limited','Variable cap with stops'],['varcap_free','Variable cap, free rotation'],['variometer','Variometer, free rotation']];
+const LIMITED={inductor:1,vacuum_cap:1,varcap_limited:1};
+let lastMsg={};
+// Every verb reply lands in the axis' message line so a refused move
+// ("at max limit") is visible next to the buttons, not just in Serial.
+async function cmd(u,ax){try{const r=await fetch(u);const t=(await r.text()).trim();if(ax){lastMsg[ax]=(r.ok?'':'✗ ')+t;}await poll();}catch(e){}}
+function jog(ax,n){if(!n||isNaN(n))return;cmd('/api/jog?axis='+ax+'&dir='+(n>0?'cw':'ccw')+'&steps='+Math.abs(n),ax);}
+function jogN(ax,sgn){const v=parseInt(document.getElementById('j-'+ax).value);if(!(v>0))return;jog(ax,sgn*v);}
+function rot(ax,sgn){const v=parseInt(document.getElementById('n-'+ax).value);if(!(v>0))return;cmd('/api/rotate?axis='+ax+'&revs='+v+'&dir='+(sgn>0?'cw':'ccw'),ax);}
 function setSpd(ax){const el=document.getElementById('s-'+ax);if(el.value==='')return;cmd('/api/speed?axis='+ax+'&v='+el.value);}
 function setAcc(ax){const el=document.getElementById('a-'+ax);if(el.value==='')return;cmd('/api/accel?axis='+ax+'&v='+el.value);}
-// Refresh a numeric field from the poll ONLY if the operator has not edited
-// it. Without this, clicking Set blurs the field and a poll landing between
-// mouse-down and mouse-up overwrites the typed value with the live one.
+function setElem(ax){const k=document.getElementById('k-'+ax).value;const m=document.getElementById('m-'+ax).value;
+  if(LIMITED[k]&&!(parseFloat(m)>0)){lastMsg[ax]='✗ enter the rated travel (revolutions) for this element';poll();return;}
+  if(LIMITED[k]&&!confirm('Set '+ax+' as '+k+' with '+m+' rev of travel?\nThe window protects the device only after you declare home (Set current pos as home) a few steps inside the physical stop.'))return;
+  cmd('/api/element?axis='+ax+'&kind='+k+'&max_rev='+(m||0),ax);}
+function unhome(ax){if(confirm('Unset home on '+ax+'? The travel window will be INACTIVE until you set home again.'))cmd('/api/unhome?axis='+ax,ax);}
+// Refresh a field from the poll ONLY if the operator has not edited it.
 function syncField(el,v){
   if(document.activeElement===el)return;
   const live=String(v);
-  if(el.value===live){el.dataset.auto=live;return;}      // in sync — remember it
-  if(el.value===''||el.value===el.dataset.auto){el.value=live;el.dataset.auto=live;} // untouched — follow live
-  // otherwise: operator-edited, leave it alone until they Set it
+  if(el.value===live){el.dataset.auto=live;return;}
+  if(el.value===''||el.value===el.dataset.auto||el.dataset.auto===undefined){el.value=live;el.dataset.auto=live;}
 }
-async function poll(){
-  try{
-    const r=await fetch('/api/status');
-    const s=await r.json();
-    render(s);
-  }catch(e){}
-}
+async function poll(){try{const r=await fetch('/api/status');render(await r.json());}catch(e){}}
 function render(s){
   document.getElementById('be').textContent=s.net.backend;
   document.getElementById('ip').textContent=s.net.ip;
@@ -803,33 +1259,47 @@ function render(s){
   document.getElementById('me').textContent=s.motors?'ENABLED':'disabled';
   document.getElementById('ir').textContent=s.release?'ON':'OFF';
   const root=document.getElementById('axes');
-  // Build only once; update text after.
   if(root.childElementCount!==s.axes.length){
     root.innerHTML='';
     for(const a of s.axes){
       const d=document.createElement('div');
       d.className='axis';d.id='ax-'+a.name;
+      const opts=KINDS.map(k=>`<option value="${k[0]}">${k[1]}</option>`).join('');
       d.innerHTML=`
-<h2><span class="axname">${a.name}</span> axis <span class="sel"></span><span class="hom">HOMING</span></h2>
-<div class="kv">pos <b class="pos">?</b> steps <span class="sep">·</span> spd <b class="spd">?</b> live <b class="lsp">?</b> <span class="sep">·</span> accel <b class="acc">?</b> <span class="sep">·</span> cont <b class="con">?</b> <span class="sep">·</span> limit <span class="lim">?</span></div>
-<div class="kv job">rotate job <b class="jreq">none</b> <span class="jinfo"></span><div class="bar"><div class="fill"></div></div></div>
+<h2><span class="axname">${a.name}</span> axis <span class="sel"></span><span class="bdg hom">HOMING</span><span class="bdg dim unc">NO ELEMENT SET — TRAVEL UNLIMITED</span><span class="bdg warn nohome">HOME NOT SET — WINDOW INACTIVE</span><span class="bdg run torun"></span><span class="bdg red limhit"></span></h2>
+<div class="kv">pos <b class="pos">?</b> steps <span class="sep">·</span> turn <b class="trn">?</b> <span class="mxr"></span> <span class="sep">·</span> travel <b class="trv">?</b> <span class="sep">·</span> spd <b class="spd">?</b> live <b class="lsp">?</b> <span class="sep">·</span> accel <b class="acc">?</b> <span class="sep">·</span> cont <b class="con">?</b> <span class="sep">·</span> switch <span class="sw">?</span></div>
+<div class="pbar twin"><div class="tfill"></div></div>
+<div class="kv job">rotate job <b class="jreq">none</b> <span class="jinfo"></span><div class="pbar"><div class="fill"></div></div></div>
+<div class="msg"></div>
 <div class="row">
   <button onclick="cmd('/api/select?axis=${a.name}')">Select</button>
-  <button onclick="cmd('/api/jog?axis=${a.name}&dir=cw')">Jog +100</button>
-  <button onclick="cmd('/api/jog?axis=${a.name}&dir=ccw')">Jog −100</button>
-  <button onclick="cmd('/api/rotate?axis=${a.name}&revs=1&dir=cw')">+1 rev</button>
-  <button onclick="cmd('/api/rotate?axis=${a.name}&revs=1&dir=ccw')">−1 rev</button>
-  <input type="number" id="n-${a.name}" value="5" min="1">
-  <button onclick="cmd('/api/rotate?axis=${a.name}&revs='+document.getElementById('n-${a.name}').value+'&dir=cw')">+N rev</button>
-  <button onclick="cmd('/api/rotate?axis=${a.name}&revs='+document.getElementById('n-${a.name}').value+'&dir=ccw')">−N rev</button>
+  <button onclick="jog('${a.name}',-100)">−100</button>
+  <button onclick="jog('${a.name}',-10)">−10</button>
+  <button onclick="jog('${a.name}',-1)">−1 step</button>
+  <button onclick="jog('${a.name}',1)">+1 step</button>
+  <button onclick="jog('${a.name}',10)">+10</button>
+  <button onclick="jog('${a.name}',100)">+100</button>
+  <input type="number" id="j-${a.name}" value="500" min="1" step="1" title="steps">
+  <button onclick="jogN('${a.name}',-1)">−N steps</button>
+  <button onclick="jogN('${a.name}',1)">+N steps</button>
 </div>
 <div class="row">
-  <button class="go" onclick="cmd('/api/continuous?axis=${a.name}&dir=cw')">▶ Cont CW</button>
-  <button class="go" onclick="cmd('/api/continuous?axis=${a.name}&dir=ccw')">◀ Cont CCW</button>
-  <button onclick="cmd('/api/continuous?axis=${a.name}&dir=stop')">Stop cont</button>
-  <button onclick="cmd('/api/stop?axis=${a.name}')">Stop (decel)</button>
+  <button onclick="cmd('/api/rotate?axis=${a.name}&revs=1&dir=ccw','${a.name}')">−1 rev</button>
+  <button onclick="cmd('/api/rotate?axis=${a.name}&revs=1&dir=cw','${a.name}')">+1 rev</button>
+  <input type="number" id="n-${a.name}" value="5" min="1" title="revolutions">
+  <button onclick="rot('${a.name}',-1)">−N rev</button>
+  <button onclick="rot('${a.name}',1)">+N rev</button>
+  <button class="go" onclick="cmd('/api/continuous?axis=${a.name}&dir=ccw','${a.name}')">◀ Run CCW</button>
+  <button class="go" onclick="cmd('/api/continuous?axis=${a.name}&dir=cw','${a.name}')">Run CW ▶</button>
+  <button onclick="cmd('/api/stop?axis=${a.name}')">Stop</button>
   <button class="danger" onclick="cmd('/api/estop?axis=${a.name}')">E-STOP</button>
-  <button onclick="cmd('/api/zero?axis=${a.name}')">Set current pos as home</button>
+</div>
+<div class="row">
+  element <select id="k-${a.name}">${opts}</select>
+  rated travel <input type="number" id="m-${a.name}" min="0" step="0.5" title="revolutions"> rev
+  <button onclick="setElem('${a.name}')">Set element</button>
+  <button onclick="cmd('/api/zero?axis=${a.name}','${a.name}')">Set current pos as home</button>
+  <button onclick="unhome('${a.name}')">Unset home</button>
 </div>
 <div class="row">
   spd <input type="number" id="s-${a.name}" min="1" max="200000" step="50" onkeydown="if(event.key==='Enter')setSpd('${a.name}')"> <button onclick="setSpd('${a.name}')">Set</button>
@@ -842,39 +1312,68 @@ function render(s){
   for(const a of s.axes){
     const d=document.getElementById('ax-'+a.name);
     if(!d)continue;
+    const e=a.element||{kind:'unset',travel:'unlimited',last_clamp:'none'};
+    const lim=!!e.limited, hasStops=!!LIMITED[e.kind];
     d.classList.toggle('active',a.selected);
     d.querySelector('.sel').textContent=a.selected?'(active)':'';
     d.querySelector('.hom').classList.toggle('on',!!a.homing);
+    d.querySelector('.unc').classList.toggle('on',e.kind==='unset');
+    d.querySelector('.nohome').classList.toggle('on',hasStops&&!e.home_set);
+    // Travel-window badges: latched "stopped at X", running-to-X, or plain at-bound.
+    const atBound=(e.travel==='home'||e.travel==='max'||e.travel==='below_home'||e.travel==='above_max');
+    const hit=d.querySelector('.limhit'),torun=d.querySelector('.torun');
+    let showHit=false,showRun=false;
+    if(lim&&e.last_clamp!=='none'){
+      if(a.running){torun.textContent='→ running to '+e.last_clamp.toUpperCase()+' limit';showRun=true;}
+      else if(e.travel===e.last_clamp){hit.textContent='STOPPED AT '+e.last_clamp.toUpperCase()+' LIMIT';showHit=true;}
+      else if(e.travel==='below_home'||e.travel==='above_max'){hit.textContent='OUTSIDE WINDOW ('+e.travel.replace('_',' ')+') — only moves back in are allowed';showHit=true;}
+      else{torun.textContent='run to '+e.last_clamp.toUpperCase()+' limit interrupted';showRun=true;}
+    }else if(lim&&(e.travel==='home'||e.travel==='max')){hit.textContent='AT '+e.travel.toUpperCase();showHit=true;}
+    else if(lim&&(e.travel==='below_home'||e.travel==='above_max')){hit.textContent='OUTSIDE WINDOW ('+e.travel.replace('_',' ')+') — only moves back in are allowed';showHit=true;}
+    hit.classList.toggle('on',showHit);torun.classList.toggle('on',showRun);
+    d.classList.toggle('atlimit',showHit);
     d.querySelector('.pos').textContent=a.position;
+    d.querySelector('.trn').textContent=(e.turns!==undefined?e.turns.toFixed(3):'?');
+    d.querySelector('.mxr').textContent=hasStops?'/ '+e.max_rev.toFixed(2)+' rev':'rev (no stops)';
+    const trv=d.querySelector('.trv');trv.textContent=e.travel.replace('_',' ');
+    trv.style.color=(lim&&atBound)?'#f44':(e.travel==='unhomed'?'#fc3':'#eee');
+    const tw=d.querySelector('.twin'),tf=d.querySelector('.tfill');
+    if(hasStops&&e.max_steps>0){tw.style.display='block';const f=Math.max(0,Math.min(1,a.position/e.max_steps));tf.style.width=(100*f)+'%';tf.className='tfill'+((lim&&atBound)?' edge':'');}
+    else tw.style.display='none';
     d.querySelector('.spd').textContent=a.speed;
     d.querySelector('.lsp').textContent=a.live_speed;
     const ssp=d.querySelector('.ssp'); ssp.textContent=a.saved_speed+' / '+a.saved_accel;
     ssp.style.color=(a.saved_speed==a.speed&&a.saved_accel==a.accel)?'#4f4':'#fc3';
     d.querySelector('.acc').textContent=a.accel;
     d.querySelector('.con').textContent=a.continuous;
-    const lim=d.querySelector('.lim');
-    lim.textContent=a.limit;
-    lim.className='lim '+(a.limit==='ASSERTED'?'la':'lr');
+    const sw=d.querySelector('.sw');
+    sw.textContent=a.limit;
+    sw.className='sw '+(a.limit==='ASSERTED'?'la':'lr');
     const j=a.rev_job||{revs:0};
     const jr=d.querySelector('.jreq'),ji=d.querySelector('.jinfo'),jf=d.querySelector('.fill');
     if(j.revs>0){
-      jr.textContent=j.done.toFixed(2)+' / '+j.revs+' revs '+j.dir;
+      const tot=(j.eff>0)?j.eff:j.revs;
+      const eff=(j.eff!==undefined&&j.eff<j.revs-0.005)?' (window limits it to '+j.eff.toFixed(2)+')':'';
+      jr.textContent=j.done.toFixed(2)+' / '+j.revs+' revs '+j.dir+eff;
       ji.textContent=j.state==='running'?'· '+j.left.toFixed(2)+' to go'
                     :j.state==='done'?'· complete':'· stopped, '+j.left.toFixed(2)+' left';
-      jf.style.width=Math.min(100,100*j.done/j.revs)+'%';
+      jf.style.width=Math.min(100,100*j.done/tot)+'%';
       jf.className='fill '+j.state;
     }else{jr.textContent='none';ji.textContent='';jf.style.width='0';jf.className='fill';}
-    const si=document.getElementById('s-'+a.name);
-    const ai=document.getElementById('a-'+a.name);
-    syncField(si,a.speed);
-    syncField(ai,a.accel);
+    d.querySelector('.msg').textContent=lastMsg[a.name]||'';
+    syncField(document.getElementById('s-'+a.name),a.speed);
+    syncField(document.getElementById('a-'+a.name),a.accel);
+    const ks=document.getElementById('k-'+a.name);
+    if(document.activeElement!==ks){
+      if(ks.value===e.kind){ks.dataset.auto=e.kind;}
+      else if(ks.dataset.auto===undefined||ks.value===ks.dataset.auto){ks.value=e.kind;ks.dataset.auto=e.kind;}
+    }
+    syncField(document.getElementById('m-'+a.name),hasStops?e.max_rev:'');
   }
 }
-// 1000 ms — every HTTP round-trip blocks the main loop for a few ms
-// during write+flush, which stalls AccelStepper's pulse generator and
-// shows up as a visible motor stutter. Slower polling halves the
-// hitches. Real fix is hardware pulse generation per CLAUDE.md
-// "Firmware portability rule".
+// 1000 ms poll. Pulses are hardware-generated (FlexPWM) so polling no
+// longer stutters the motor, but each request still costs a few ms of
+// main-loop time in write+flush.
 poll();setInterval(poll,1000);
 </script>
 </body></html>)HTML";
@@ -915,31 +1414,12 @@ static Axis *findAxis(const char *name) {
 
 // ---- HTTP response helpers ----------------------------------------------
 
-// FNET's default per-socket send buffer is 2 KB (NativeEthernet.h
-// FNET_SOCKET_DEFAULT_SIZE). NativeEthernet's socketSend() has a
-// busy-wait spin (`while(socketSendAvailable(s) < len){}`) that hangs
-// forever if `len` ≥ buffer size — so we MUST chunk every write below
-// the buffer ceiling and flush between chunks to drain it. 1 KB chunks
-// leave plenty of headroom inside the 2 KB buffer.
-//
-// QNEthernet's write() doesn't have this bug but can also return short
-// under lwIP buffer pressure, so the same chunked loop is correct
-// across both backends.
-static constexpr size_t HTTP_WRITE_CHUNK = 1024;
-
-static bool writeAll(EthernetClient &c, const uint8_t *buf, size_t n) {
-    size_t sent = 0;
-    while (sent < n) {
-        if (!c.connected()) return false;
-        size_t want = n - sent;
-        if (want > HTTP_WRITE_CHUNK) want = HTTP_WRITE_CHUNK;
-        size_t w = c.write(buf + sent, want);
-        if (w == 0) return false;
-        sent += w;
-        if (sent < n) c.flush();  // drain so the next chunk has room
-    }
-    return true;
-}
+// Every write goes through net_hal::write_all: chunked below FNET's 2 KB
+// per-socket send buffer and flushed between chunks, because
+// NativeEthernet's socketSend() busy-waits forever on a single write of
+// ≥ that size (QNEthernet can return short too). The bench found this;
+// the helper now lives in the shared library so every sketch gets it.
+using net_hal::write_all;
 
 static void httpSendHeader(EthernetClient &c, int code, const char *status,
                            const char *ctype, int contentLen) {
@@ -951,20 +1431,20 @@ static void httpSendHeader(EthernetClient &c, int code, const char *status,
                      "Cache-Control: no-store\r\n"
                      "Connection: close\r\n\r\n",
                      code, status, ctype, contentLen);
-    writeAll(c, reinterpret_cast<const uint8_t *>(hdr), n);
+    write_all(c, hdr, n);
 }
 
 static void httpSendText(EthernetClient &c, int code, const char *status,
                          const char *body) {
     const int n = (int)strlen(body);
     httpSendHeader(c, code, status, "text/plain; charset=utf-8", n);
-    writeAll(c, reinterpret_cast<const uint8_t *>(body), n);
+    write_all(c, body, n);
 }
 
 static void httpServeIndex(EthernetClient &c) {
     const int n = (int)(sizeof(INDEX_HTML) - 1);
     httpSendHeader(c, 200, "OK", "text/html; charset=utf-8", n);
-    writeAll(c, reinterpret_cast<const uint8_t *>(INDEX_HTML), n);
+    write_all(c, INDEX_HTML, n);
 }
 
 // Rotate-N job progress for one axis. done/left in revolutions (float);
@@ -985,7 +1465,7 @@ static void revJobProgress(const Axis &a, float &done, float &left,
 }
 
 static void httpServeStatusJson(EthernetClient &c) {
-    char json[1024];
+    char json[3072];   // ~600 B per axis with the element block; 3 axes + header
     const IPAddress ip = Ethernet.localIP();
     int n = snprintf(json, sizeof(json),
         "{\"net\":{\"backend\":\"%s\",\"link\":\"%s\",\"ip\":\"%u.%u.%u.%u\"},"
@@ -1001,57 +1481,56 @@ static void httpServeStatusJson(EthernetClient &c) {
         const char *lim  = a.limitLastState == LOW ? "ASSERTED" : "released";
         float jdone, jleft; const char *jdir, *jstate;
         revJobProgress(a, jdone, jleft, jdir, jstate);
+        const long   pos  = a.stepper.position();
+        const double jeff = (double)labs(a.revJobTargetPos - a.revJobStartPos) / (double)STEPS_PER_REV;
         n += snprintf(json + n, sizeof(json) - n,
             "%s{\"name\":\"%s\",\"position\":%ld,\"speed\":%.0f,\"accel\":%.0f,\"saved_speed\":%.0f,\"saved_accel\":%.0f,\"live_speed\":%lu,"
-            "\"continuous\":\"%s\",\"limit\":\"%s\",\"selected\":%s,\"homing\":%s,"
-            "\"rev_job\":{\"revs\":%d,\"dir\":\"%s\",\"done\":%.2f,\"left\":%.2f,\"state\":\"%s\"}}",
+            "\"continuous\":\"%s\",\"limit\":\"%s\",\"selected\":%s,\"homing\":%s,\"running\":%s,"
+            "\"element\":{\"kind\":\"%s\",\"kind_id\":%u,\"limited\":%s,\"max_rev\":%.3f,\"max_steps\":%ld,"
+            "\"home_set\":%s,\"travel\":\"%s\",\"last_clamp\":\"%s\",\"turns\":%.3f},"
+            "\"rev_job\":{\"revs\":%d,\"eff\":%.2f,\"dir\":\"%s\",\"done\":%.2f,\"left\":%.2f,\"state\":\"%s\"}}",
             i > 0 ? "," : "",
-            a.name, a.stepper.position(), a.currentSpeed, a.currentAccel, a.savedSpeed,
+            a.name, pos, a.currentSpeed, a.currentAccel, a.savedSpeed,
             a.savedAccel, (unsigned long)a.stepper.speed(),
             cont, lim, (&a == selected) ? "true" : "false",
             a.homing ? "true" : "false",
-            a.revJobRevs, jdir, (double)jdone, (double)jleft, jstate);
+            a.stepper.isRunning() ? "true" : "false",
+            kindName(a.kind), (unsigned)a.kind, limitsActive(a) ? "true" : "false",
+            (double)a.maxRev, a.maxSteps,
+            a.homeSet ? "true" : "false", travelState(a), clampName(a.lastClamp),
+            (double)pos / (double)STEPS_PER_REV,
+            a.revJobRevs, a.revJobRevs > 0 ? jeff : 0.0, jdir, (double)jdone, (double)jleft, jstate);
     }
     n += snprintf(json + n, sizeof(json) - n, "]}");
     httpSendHeader(c, 200, "OK", "application/json", n);
-    writeAll(c, reinterpret_cast<const uint8_t *>(json), n);
+    write_all(c, json, n);
 }
 
-// ---- HTTP motion helpers (FlexPWM-backed, non-blocking by design) ------
-// All FlexPwmStepper calls are non-blocking — they just configure the
-// submodule and return — so HTTP and Serial paths look the same.
+// ---- HTTP motion reply --------------------------------------------------
+// HTTP verbs call the same jogSteps / moveRevolutions / startContinuous
+// as the Serial menu; this maps the shared MoveResult onto a reply. A
+// clamped move is 200 with the bound named (the UI shows it in the axis
+// message line); a move refused at a bound is 409 so it stands out.
 
-static bool webJog(Axis &a, int dir) {
-    if (!motorEnabled) return false;
-    cancelHoming(a);
-    clearRevJob(a);
-    ensureDriverReady(a);
-    a.continuousMode = false;
-    a.stepper.setSpeed((uint32_t)a.currentSpeed);
-    a.stepper.moveSteps((long)dir * 100);
-    a.lastMotionMs = millis();
-    a.wasRunning = true;
-    return true;
-}
-
-static bool webContinuous(Axis &a, int dir) {
-    if (dir == 0) {
-        cancelHoming(a);
-        a.continuousMode = false;
-        a.stepper.stop();
-        return true;
+static void httpMoveReply(EthernetClient &c, const Axis &a, MoveResult r, const char *verb) {
+    char body[80];
+    switch (r) {
+    case MOVE_STARTED:
+        snprintf(body, sizeof(body), "%s\n", verb);
+        httpSendText(c, 200, "OK", body); return;
+    case MOVE_CLAMPED:
+        snprintf(body, sizeof(body), "%s: travel window - will stop at %s limit\n", verb, clampName(a.lastClamp));
+        httpSendText(c, 200, "OK", body); return;
+    case MOVE_AT_LIMIT:
+        snprintf(body, sizeof(body), "refused: already at %s limit\n", clampName(a.lastClamp));
+        httpSendText(c, 409, "Conflict", body); return;
+    case MOVE_DISABLED:
+        httpSendText(c, 409, "Conflict", "motors disabled\n"); return;
+    case MOVE_NOOP:
+        snprintf(body, sizeof(body), "%s: already there\n", verb);
+        httpSendText(c, 200, "OK", body); return;
     }
-    if (!motorEnabled) return false;
-    cancelHoming(a);
-    clearRevJob(a);
-    ensureDriverReady(a);
-    a.continuousMode  = true;
-    a.continuousDir   = dir > 0 ? +1 : -1;
-    a.lastReportedRev = a.stepper.position() / STEPS_PER_REV;
-    a.lastContSaveMs  = millis();
-    a.stepper.setSpeed((uint32_t)a.currentSpeed);
-    a.stepper.runContinuous(a.continuousDir);
-    return true;
+    httpSendText(c, 500, "Internal Server Error", "unknown move result\n");
 }
 
 // ---- Dispatcher --------------------------------------------------------
@@ -1076,13 +1555,16 @@ static void httpDispatch(EthernetClient &c, const char *path, const char *query)
         httpSendText(c, 400, "Bad Request", "bad axis\n"); return;
     }
 
+    // /api/jog?axis=X&dir=cw|ccw[&steps=N]  — N defaults to 100; N = 1 is
+    // the fine-tuning single step. Clamped to the travel window.
     if (strcmp(path, "/api/jog") == 0) {
         Axis *a = getParam(query, "axis", axisName, sizeof(axisName)) ? findAxis(axisName) : nullptr;
         getParam(query, "dir", dirStr, sizeof(dirStr));
         int dir = (strcmp(dirStr, "cw") == 0) ? +1 : (strcmp(dirStr, "ccw") == 0) ? -1 : 0;
-        if (!a || dir == 0) { httpSendText(c, 400, "Bad Request", "bad axis/dir\n"); return; }
-        if (!webJog(*a, dir)) { httpSendText(c, 409, "Conflict", "motors disabled\n"); return; }
-        httpSendText(c, 200, "OK", "jog\n"); return;
+        long steps = 100;
+        if (getParam(query, "steps", valStr, sizeof(valStr))) steps = atol(valStr);
+        if (!a || dir == 0 || steps <= 0 || steps > 100000000L) { httpSendText(c, 400, "Bad Request", "bad axis/dir/steps\n"); return; }
+        httpMoveReply(c, *a, jogSteps(*a, (long)dir * steps), "jog"); return;
     }
 
     if (strcmp(path, "/api/rotate") == 0) {
@@ -1092,9 +1574,7 @@ static void httpDispatch(EthernetClient &c, const char *path, const char *query)
         int dir = (strcmp(dirStr, "cw") == 0) ? +1 : (strcmp(dirStr, "ccw") == 0) ? -1 : 0;
         int n   = atoi(valStr);
         if (!a || dir == 0 || n <= 0) { httpSendText(c, 400, "Bad Request", "bad args\n"); return; }
-        a->continuousMode = false;
-        moveRevolutions(*a, n, dir);
-        httpSendText(c, 200, "OK", "rotate\n"); return;
+        httpMoveReply(c, *a, moveRevolutions(*a, n, dir), "rotate"); return;
     }
 
     if (strcmp(path, "/api/continuous") == 0) {
@@ -1106,36 +1586,55 @@ static void httpDispatch(EthernetClient &c, const char *path, const char *query)
         else if (strcmp(dirStr, "stop") == 0) dir =  0;
         else { httpSendText(c, 400, "Bad Request", "bad dir\n"); return; }
         if (!a) { httpSendText(c, 400, "Bad Request", "bad axis\n"); return; }
-        if (!webContinuous(*a, dir)) { httpSendText(c, 409, "Conflict", "motors disabled\n"); return; }
-        httpSendText(c, 200, "OK", "continuous\n"); return;
+        if (dir == 0) { stopAxis(*a, F("continuous stopped.")); httpSendText(c, 200, "OK", "stopped\n"); return; }
+        httpMoveReply(c, *a, startContinuous(*a, dir), limitsActive(*a) ? "run to end" : "continuous"); return;
     }
 
     if (strcmp(path, "/api/stop") == 0) {
         Axis *a = getParam(query, "axis", axisName, sizeof(axisName)) ? findAxis(axisName) : nullptr;
         if (!a) { httpSendText(c, 400, "Bad Request", "bad axis\n"); return; }
-        cancelHoming(*a);
-        a->continuousMode = false;
-        a->stepper.stop();
+        stopAxis(*a, F("STOP."));
         httpSendText(c, 200, "OK", "stop\n"); return;
     }
 
     if (strcmp(path, "/api/estop") == 0) {
         Axis *a = getParam(query, "axis", axisName, sizeof(axisName)) ? findAxis(axisName) : nullptr;
         if (!a) { httpSendText(c, 400, "Bad Request", "bad axis\n"); return; }
-        cancelHoming(*a);
-        a->continuousMode = false;
-        a->stepper.stop();   // FlexPWM is constant-velocity: stop() === e-stop
+        stopAxis(*a, F("EMERGENCY STOP."));   // FlexPWM is constant-velocity: stop() === e-stop
         httpSendText(c, 200, "OK", "estop\n"); return;
     }
 
     if (strcmp(path, "/api/zero") == 0) {
         Axis *a = getParam(query, "axis", axisName, sizeof(axisName)) ? findAxis(axisName) : nullptr;
         if (!a) { httpSendText(c, 400, "Bad Request", "bad axis\n"); return; }
-        cancelHoming(*a);
-        clearRevJob(*a);
-        a->stepper.setPosition(0);
-        savePositionIfChanged(*a);
-        httpSendText(c, 200, "OK", "zeroed\n"); return;
+        zeroAxis(*a);
+        httpSendText(c, 200, "OK", limitsActive(*a) ? "home set - travel window active\n"
+                                                    : "home set\n"); return;
+    }
+
+    // /api/unhome?axis=X — forget home; window inactive until /api/zero.
+    if (strcmp(path, "/api/unhome") == 0) {
+        Axis *a = getParam(query, "axis", axisName, sizeof(axisName)) ? findAxis(axisName) : nullptr;
+        if (!a) { httpSendText(c, 400, "Bad Request", "bad axis\n"); return; }
+        unsetHome(*a);
+        httpSendText(c, 200, "OK", "home unset - travel window INACTIVE\n"); return;
+    }
+
+    // /api/element?axis=X&kind=<id|name>[&max_rev=F] — declare the element
+    // on the shaft. Kinds with stops need max_rev > 0 (revolutions).
+    if (strcmp(path, "/api/element") == 0) {
+        Axis *a = getParam(query, "axis", axisName, sizeof(axisName)) ? findAxis(axisName) : nullptr;
+        char kindStr[20];
+        if (!a || !getParam(query, "kind", kindStr, sizeof(kindStr))) { httpSendText(c, 400, "Bad Request", "bad axis/kind\n"); return; }
+        const int k = parseKind(kindStr);
+        if (k < 0) { httpSendText(c, 400, "Bad Request", "unknown kind\n"); return; }
+        float mr = 0.0f;
+        if (getParam(query, "max_rev", valStr, sizeof(valStr))) mr = strtof(valStr, nullptr);
+        if (!setElement(*a, (uint8_t)k, mr)) { httpSendText(c, 400, "Bad Request", "kinds with stops need max_rev > 0\n"); return; }
+        httpSendText(c, 200, "OK", kindHasStops((uint8_t)k)
+            ? (a->homeSet ? "element set - travel window active\n"
+                          : "element set - now declare home to activate the window\n")
+            : "element set - no stops, travel unlimited\n"); return;
     }
 
     if (strcmp(path, "/api/save_speed") == 0) {
@@ -1269,6 +1768,8 @@ void setup() {
 
     nvsInit();
     nvsInitSpeed();
+    nvsInitElement();
+    nvsInitAxisZ();
     idleAutoRelease = nvsLoadRelease();
 
     for (int i = 0; i < NUM_AXES; i++) {
@@ -1290,28 +1791,28 @@ void setup() {
         long savedPos = nvsLoadPosition(a.ee_pos_addr);
         a.stepper.setPosition(savedPos);
         a.lastSavedPos = savedPos;
+
+        nvsLoadElement(a);
     }
     enableAll(true);
 
     Serial.println();
-    Serial.println(F("Teensy 4.1 / T41 V2.09 — X+Y stepper test"));
-    Serial.print(F("X: STEP=")); Serial.print(PIN_X_STEP);
-    Serial.print(F("  DIR="));   Serial.print(PIN_X_DIR);
-    Serial.print(F("  EN="));    Serial.print(PIN_X_EN);
-    Serial.print(F("  LIMIT=")); Serial.println(PIN_X_LIMIT);
-    Serial.print(F("Y: STEP=")); Serial.print(PIN_Y_STEP);
-    Serial.print(F("  DIR="));   Serial.print(PIN_Y_DIR);
-    Serial.print(F("  EN="));    Serial.print(PIN_Y_EN);
-    Serial.print(F("  LIMIT=")); Serial.println(PIN_Y_LIMIT);
+    Serial.println(F("Teensy 4.1 / T41 V2.09 — X+Y+Z stepper test"));
+    for (int i = 0; i < NUM_AXES; i++) {
+        const Axis& a = *axes[i];
+        Serial.print(a.name);
+        Serial.print(F(": STEP="));  Serial.print(a.pin_step);
+        Serial.print(F("  DIR="));   Serial.print(a.pin_dir);
+        Serial.print(F("  EN="));    Serial.print(a.pin_en);
+        Serial.print(F("  LIMIT=")); Serial.print(a.pin_limit);
+        Serial.print(F("  speed=")); Serial.print(a.currentSpeed, 0);
+        Serial.print(F(" steps/s  accel=")); Serial.print(a.currentAccel, 0);
+        Serial.println(F(" steps/s² (EEPROM)"));
+    }
     Serial.print(F("Steps/rev: ")); Serial.println(STEPS_PER_REV);
-    Serial.print(F("Speed (EEPROM): X=")); Serial.print(xAxis.currentSpeed, 0);
-    Serial.print(F("  Y="));              Serial.print(yAxis.currentSpeed, 0);
-    Serial.println(F(" steps/s"));
-    Serial.print(F("Accel (EEPROM): X=")); Serial.print(xAxis.currentAccel, 0);
-    Serial.print(F("  Y="));              Serial.print(yAxis.currentAccel, 0);
-    Serial.println(F(" steps/s²"));
     Serial.print(F("Idle auto-release: "));
     Serial.println(idleAutoRelease ? F("ON  (silent at rest)") : F("OFF (motor holds with current)"));
+    for (int i = 0; i < NUM_AXES; i++) printElement(*axes[i]);
 
     // Ethernet + HTTP BEFORE homing so the browser sees position
     // counters decrement live during the boot-time homing move,
@@ -1358,94 +1859,39 @@ void loop() {
         selected = &yAxis;
         Serial.println(F("Active axis: Y"));
         break;
+    case 'Z': case 'z':
+        selected = &zAxis;
+        Serial.println(F("Active axis: Z"));
+        break;
 
-    case '1': a.continuousMode = false; moveRevolutions(a, 1, +1); break;
-    case '2': a.continuousMode = false; moveRevolutions(a, 1, -1); break;
+    // Motion verbs share jogSteps / moveRevolutions / startContinuous /
+    // stopAxis with the HTTP dispatcher; the travel window is enforced
+    // inside beginBoundedMove for all of them.
+    case '1': moveRevolutions(a, 1, +1); break;
+    case '2': moveRevolutions(a, 1, -1); break;
     case '3': {
-        a.continuousMode = false;
         int n = readIntFromSerial();
         if (n > 0) moveRevolutions(a, n, +1);
         break;
     }
     case '4': {
-        a.continuousMode = false;
         int n = readIntFromSerial();
         if (n > 0) moveRevolutions(a, n, -1);
         break;
     }
-    case '5':
-        cancelHoming(a);
-        a.continuousMode = false;
-        if (!motorEnabled) { Serial.println(F("Motors disabled — enable first (E).")); break; }
-        ensureDriverReady(a);
-        Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] jog CW +100 steps"));
-        clearRevJob(a);
-        a.stepper.setSpeed((uint32_t)a.currentSpeed);
-        a.stepper.moveSteps(100);   // non-blocking; ISR counts down to target
-        a.lastMotionMs = millis();
-        a.wasRunning = true;
-        break;
-    case '6':
-        cancelHoming(a);
-        a.continuousMode = false;
-        if (!motorEnabled) { Serial.println(F("Motors disabled — enable first (E).")); break; }
-        ensureDriverReady(a);
-        Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] jog CCW -100 steps"));
-        clearRevJob(a);
-        a.stepper.setSpeed((uint32_t)a.currentSpeed);
-        a.stepper.moveSteps(-100);
-        a.lastMotionMs = millis();
-        a.wasRunning = true;
-        break;
-    case '7':
-        if (a.continuousMode && a.continuousDir > 0) {
-            a.continuousMode = false;
-            a.stepper.stop();
-            Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] continuous CW stopped."));
-        } else {
-            cancelHoming(a);
-            clearRevJob(a);
-            ensureDriverReady(a);
-            a.continuousMode  = true;
-            a.continuousDir   = +1;
-            a.lastReportedRev = a.stepper.position() / STEPS_PER_REV;
-            a.lastContSaveMs  = millis();
-            a.stepper.setSpeed((uint32_t)a.currentSpeed);
-            a.stepper.runContinuous(+1);
-            Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] continuous CW started."));
-        }
-        break;
-    case '8':
-        if (a.continuousMode && a.continuousDir < 0) {
-            a.continuousMode = false;
-            a.stepper.stop();
-            Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] continuous CCW stopped."));
-        } else {
-            cancelHoming(a);
-            clearRevJob(a);
-            ensureDriverReady(a);
-            a.continuousMode  = true;
-            a.continuousDir   = -1;
-            a.lastReportedRev = a.stepper.position() / STEPS_PER_REV;
-            a.lastContSaveMs  = millis();
-            a.stepper.setSpeed((uint32_t)a.currentSpeed);
-            a.stepper.runContinuous(-1);
-            Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] continuous CCW started."));
-        }
-        break;
+    case '5': jogSteps(a, +100); break;
+    case '6': jogSteps(a, -100); break;
+    case '+': case '=': jogSteps(a, +1); break;   // '=' is the unshifted '+' key
+    case '-': case '_': jogSteps(a, -1); break;
+    case '7': toggleContinuous(a, +1); break;
+    case '8': toggleContinuous(a, -1); break;
     case '9':
         // FlexPWM constant-velocity: stop() === e-stop. No decel ramp
         // to do (kept verb name for menu familiarity).
-        cancelHoming(a);
-        a.continuousMode = false;
-        a.stepper.stop();
-        Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] STOP."));
+        stopAxis(a, F("STOP."));
         break;
     case '0':
-        cancelHoming(a);
-        a.continuousMode = false;
-        a.stepper.stop();
-        Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] EMERGENCY STOP."));
+        stopAxis(a, F("EMERGENCY STOP."));
         break;
 
     case 'S': case 's': {
@@ -1489,13 +1935,27 @@ void loop() {
             for (int i = 0; i < NUM_AXES; i++) ensureDriverReady(*axes[i]);
         }
         break;
-    case 'Z': case 'z':
-        cancelHoming(a);
-        clearRevJob(a);
-        a.stepper.setPosition(0);
-        savePositionIfChanged(a);
-        Serial.print(F("[")); Serial.print(a.name); Serial.println(F("] position zeroed (declared home)."));
+    case 'O': case 'o': zeroAxis(a); break;   // home / origin ('Z' selects the Z axis)
+    case 'U': case 'u': unsetHome(a); break;
+    case 'K': case 'k': {
+        Serial.println(F("Element kind: 0 unset  1 roller inductor  2 vacuum-variable cap  3 variable cap with stops  4 variable cap free  5 variometer"));
+        int k = readIntFromSerial();
+        if (k < 0 || k >= EK_COUNT) { Serial.println(F("bad kind")); break; }
+        float mr = a.maxRev;
+        if (kindHasStops((uint8_t)k)) {
+            Serial.println(F("Rated travel of the element in revolutions (e.g. 40 for a 40-turn vacuum cap, 0.5 for a 180° air variable):"));
+            mr = readFloatFromSerial();
+        }
+        if (!setElement(a, (uint8_t)k, mr)) Serial.println(F("rejected — kinds with stops need a rated travel > 0"));
         break;
+    }
+    case 'M': case 'm': {
+        if (!kindHasStops(a.kind)) { Serial.println(F("This element kind has no stops — set the kind first (K).")); break; }
+        Serial.println(F("Rated travel in revolutions:"));
+        float mr = readFloatFromSerial();
+        if (!setElement(a, a.kind, mr)) Serial.println(F("rejected — rated travel must be > 0"));
+        break;
+    }
 
     case 'N': case 'n': printNetStatus(); break;
 

@@ -143,7 +143,7 @@ the HAL) need to absorb. Each one is currently a known-issue; none is
 fixed in the eventual tuner-controller firmware yet.
 
 - **Stepper pulses must be hardware-generated, not main-loop-polled.**
-  Bench tests on an ESP32-C6 + TB6600 + NEMA 23 rig (firmware/esp32c6-
+  Bench tests on an ESP32-C6 + TB6600 + NEMA 23 rig (firmware/test/esp32c6-
   stepper-test) used the standard AccelStepper `runSpeed()` pattern from
   the Arduino loop. As soon as the same loop also did `Preferences`
   writes (clean-shutdown position anchor, per CLAUDE.md invariant 3),

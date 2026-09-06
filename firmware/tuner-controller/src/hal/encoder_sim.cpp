@@ -1,40 +1,36 @@
-// Simulation backend for hal::encoder. Couples the encoder count
-// directly to the motor's step counter — a perfectly-calibrated 1:1
-// encoder, no missed steps, no noise. Real implementations (M1b.2)
-// will read the Teensy's hardware QEI and apply per-axis cal.
+// hal::encoder — passthrough of the motor step counter, on every target.
 //
-// The set_count() entry point matches the post-home and NVRAM-restore
-// path from docs/ARCHITECTURE.md §5.2: after homing or anchor restore,
-// the application sets the encoder reference to a known value and the
-// motor position counter is reset to match.
+// With the iHSS60 integrated drives the position loop closes inside the
+// drive and the controller sees no counts (only ALM / PED), so the
+// step counter is the position source of record while the drive is
+// healthy (CLAUDE.md invariant 3). This file keeps the interface alive
+// so an external QEI (non-integrated motor, Phase-2 fallback) slots in
+// behind the same calls; docs/ARCHITECTURE.md §5.2.
+//
+// set_count() anchors the reported count independently of the motor
+// counter (after the operator declares home, or on NVRAM restore), so a
+// verified motion loop reads enc == steps after every move.
 
 #include "hal/hal.h"
-
-#include <cstddef>
 
 namespace hal::encoder {
 
 namespace {
-
-int32_t counts[2] = {0, 0};
-
+int32_t offsets[kMaxAxes] = {0, 0, 0};
 }
 
 void init() {
-    counts[0] = 0;
-    counts[1] = 0;
+    for (auto &o : offsets) o = 0;
 }
 
 int32_t count(Axis a) {
-    // Sim couples encoder to the motor's open-loop position so a verified
-    // motion loop reads `l_enc == l_steps` after every move. Real
-    // hardware reads the QEI peripheral instead.
-    return motor::position(a) + counts[static_cast<size_t>(a)];
+    if (a >= kMaxAxes) return 0;
+    return motor::position(a) + offsets[a];
 }
 
 void set_count(Axis a, int32_t value) {
-    // Offset so future count(a) reads return `value` until the motor moves.
-    counts[static_cast<size_t>(a)] = value - motor::position(a);
+    if (a >= kMaxAxes) return;
+    offsets[a] = value - motor::position(a);
 }
 
 } // namespace hal::encoder
