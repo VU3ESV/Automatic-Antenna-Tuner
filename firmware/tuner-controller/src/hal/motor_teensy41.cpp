@@ -46,8 +46,8 @@ constexpr uint8_t EN_OFF = board::EN_ACTIVE_LOW ? HIGH : LOW;
 struct AxisDrv {
     FlexPwmStepper stepper;
     uint8_t        pin_en;
-    uint32_t       speed      = 25600;
-    uint32_t       accel      = 25600;
+    uint32_t       speed      = kDefaultSpeed;
+    uint32_t       accel      = kDefaultAccel;
     bool           enabled    = true;
     bool           rampActive = false;
     float          rampSpeed  = 0.0f;
@@ -157,7 +157,7 @@ void set_position(Axis a, int32_t value) {
 void set_speed(Axis a, uint32_t v) {
     AxisDrv &d = D(a);
     if (v < 1) v = 1;
-    if (v > 200000) v = 200000;
+    if (v > kMaxSpeed) v = kMaxSpeed;
     d.speed = v;
     if (!d.rampActive) d.stepper.setSpeed(v);   // mid-ramp: serviceRamp converges instead
 }

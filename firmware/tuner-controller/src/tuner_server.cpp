@@ -21,7 +21,6 @@ struct Connection {
     // three-element set_topology frame.
     char           rx_buf[768];
     size_t         rx_len;
-    bool           sent_initial_state;
 };
 
 Connection conns[kMaxClients];
@@ -40,19 +39,10 @@ uint32_t next_seq() {
 
 // Write a complete JSON frame + '\n' to one client. Drops the frame
 // silently if the socket would block; the slow-client drop is
-// intentional per PROTOCOL.md §5. Chunked below the NativeEthernet
-// socket-buffer ceiling (see http_server.cpp for the rationale).
+// intentional per PROTOCOL.md §5. net_hal::write_all chunks below the
+// NativeEthernet socket-buffer ceiling.
 bool send_frame(EthernetClient &c, const char *frame, int n) {
-    if (!c.connected() || n <= 0) return false;
-    constexpr int kChunk = 1024;
-    int sent = 0;
-    while (sent < n) {
-        const int want = (n - sent) > kChunk ? kChunk : (n - sent);
-        const size_t w = c.write(reinterpret_cast<const uint8_t *>(frame + sent), want);
-        if (w == 0) return false;
-        sent += static_cast<int>(w);
-        if (sent < n) c.flush();
-    }
+    if (n <= 0 || !net_hal::write_all(c, frame, static_cast<size_t>(n))) return false;
     c.write('\n');
     return true;
 }
@@ -124,8 +114,8 @@ void dispatch(Connection &conn, const char *line, size_t line_len, const app::In
     if (strcmp(act, "move_l") == 0 || strcmp(act, "move_c") == 0) {
         int32_t value = 0; bool is_delta = true;
         if (!app::parse_args_move(line, line_len, value, is_delta)) return bad_args("expected delta_steps or target_steps");
-        reply(act[5] == 'l' ? app::motion::move_l(value, is_delta, err)
-                            : app::motion::move_c(value, is_delta, err));
+        reply(strcmp(act, "move_l") == 0 ? app::motion::move_l(value, is_delta, err)
+                                         : app::motion::move_c(value, is_delta, err));
         return;
     }
 
@@ -154,7 +144,7 @@ void dispatch(Connection &conn, const char *line, size_t line_len, const app::In
     }
 
     if (strcmp(act, "estop") == 0 || strcmp(act, "estop_reset") == 0) {
-        const bool reset = act[5] == '_';
+        const bool reset = strcmp(act, "estop_reset") == 0;
         if (!app::parse_args_axis(line, line_len, axis, /*required=*/false)) return bad_args("malformed args");
         if (axis[0] == '\0') {
             if (reset) app::motion::estop_reset_all(); else app::motion::estop_all();
@@ -172,8 +162,8 @@ void dispatch(Connection &conn, const char *line, size_t line_len, const app::In
         if (!app::parse_args_axis(line, line_len, axis, /*required=*/true)) return bad_args("expected axis");
         const int a = resolve_or_reply(c, cmd.id, axis);
         if (a < 0) return;
-        reply(act[0] == 's' ? app::motion::set_home(static_cast<uint8_t>(a), err)
-                            : app::motion::unset_home(static_cast<uint8_t>(a), err));
+        reply(strcmp(act, "set_home") == 0 ? app::motion::set_home(static_cast<uint8_t>(a), err)
+                                           : app::motion::unset_home(static_cast<uint8_t>(a), err));
         return;
     }
 
@@ -270,18 +260,16 @@ void manage_connections() {
             conn.client.stop();
             conn.in_use = false;
             conn.rx_len = 0;
-            conn.sent_initial_state = false;
         }
     }
     EthernetClient newClient = server.accept();
     if (!newClient) return;
     for (auto &conn : conns) {
         if (!conn.in_use) {
-            conn.client             = newClient;
-            conn.in_use             = true;
-            conn.rx_len             = 0;
+            conn.client = newClient;
+            conn.in_use = true;
+            conn.rx_len = 0;
             send_state_to(conn.client);   // warm start
-            conn.sent_initial_state = true;
             return;
         }
     }
@@ -293,9 +281,8 @@ void manage_connections() {
 void begin() {
     server.begin();
     for (auto &conn : conns) {
-        conn.in_use             = false;
-        conn.rx_len             = 0;
-        conn.sent_initial_state = false;
+        conn.in_use = false;
+        conn.rx_len = 0;
     }
     last_heartbeat_ms = millis();
 }

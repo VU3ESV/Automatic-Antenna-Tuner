@@ -73,8 +73,10 @@ struct Snapshot {
 
     // Legacy v1 accessors for the master's l_steps / c_steps fields:
     // the axis bound to element `name`, or -1.
-    int axis_of(const char *name) const { return topology.element_by_name(name) >= 0
-                                                 ? topology.elements[topology.element_by_name(name)].axis : -1; }
+    int axis_of(const char *name) const {
+        const int i = topology.element_by_name(name);
+        return i >= 0 ? topology.elements[i].axis : -1;
+    }
 };
 
 } // namespace app

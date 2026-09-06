@@ -122,6 +122,17 @@ bool any_busy() {
     return false;
 }
 
+// move_l / move_c (v1 master protocol) resolve the element name through
+// the Balanced L topology and land on move_axis().
+bool move_named(const char *name, int32_t value, bool is_delta, Refusal &e) {
+    if (cfg.topology.kind != TopologyKind::BalancedL) {
+        return refuse(e, "wrong_topology", "move_l / move_c apply to the Balanced L network only; use move_axis");
+    }
+    const int i = cfg.topology.element_by_name(name);
+    if (i < 0) return refuse(e, "bad_axis", "element not bound");
+    return accepted(move_axis(cfg.topology.elements[i].axis, value, is_delta, e));
+}
+
 } // namespace
 
 // ── Lifecycle ───────────────────────────────────────────────────────────
@@ -375,17 +386,6 @@ bool set_fwd_w_fake(float w, Refusal &e) {
 }
 
 // ── Legacy aliases ──────────────────────────────────────────────────────
-
-namespace {
-bool move_named(const char *name, int32_t value, bool is_delta, Refusal &e) {
-    if (cfg.topology.kind != TopologyKind::BalancedL) {
-        return refuse(e, "wrong_topology", "move_l / move_c apply to the Balanced L network only; use move_axis");
-    }
-    const int i = cfg.topology.element_by_name(name);
-    if (i < 0) return refuse(e, "bad_axis", "element not bound");
-    return accepted(move_axis(cfg.topology.elements[i].axis, value, is_delta, e));
-}
-}
 
 bool move_l(int32_t value, bool is_delta, Refusal &e) { return move_named("L", value, is_delta, e); }
 bool move_c(int32_t value, bool is_delta, Refusal &e) { return move_named("C", value, is_delta, e); }

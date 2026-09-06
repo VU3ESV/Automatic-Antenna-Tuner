@@ -17,28 +17,12 @@ namespace {
 EthernetServer server(kPort);
 bool           ready = false;
 
-// ── Transport helpers (bench-proven, see PROPOSAL.md "Bench-test learnings")
+// ── Transport helpers ───────────────────────────────────────────────────
+// Every write goes through net_hal::write_all (chunked, flushed between
+// chunks — the NativeEthernet send-buffer footgun) and tick() flushes
+// before stop() for the same reason.
 
-// FNET's default per-socket send buffer is 2 KB and NativeEthernet's
-// socketSend() busy-waits forever if a single write is ≥ that size, so
-// every write is chunked below the ceiling and flushed between chunks.
-// QNEthernet can also return short under lwIP buffer pressure, so the
-// same loop is correct on both backends.
-constexpr size_t kWriteChunk = 1024;
-
-bool write_all(EthernetClient &c, const char *buf, size_t n) {
-    size_t sent = 0;
-    while (sent < n) {
-        if (!c.connected()) return false;
-        size_t want = n - sent;
-        if (want > kWriteChunk) want = kWriteChunk;
-        const size_t w = c.write(reinterpret_cast<const uint8_t *>(buf + sent), want);
-        if (w == 0) return false;
-        sent += w;
-        if (sent < n) c.flush();
-    }
-    return true;
-}
+using net_hal::write_all;
 
 void send_header(EthernetClient &c, int code, const char *status, const char *ctype, int len) {
     char hdr[192];
@@ -108,20 +92,18 @@ int dir_of(const char *query) {
     return 0;
 }
 
+// Map a MoveResult onto the reply: 200 with the verb echoed (the page
+// learns which bound a clamped move stops at from the status poll),
+// 409 for a refusal.
 void reply_move(EthernetClient &c, app::motion::MoveResult r, const app::motion::Refusal &e,
-                const char *verb, uint8_t axis) {
+                const char *verb) {
     using app::motion::MoveResult;
-    const app::AxisSnapshot dummy{};
-    (void)dummy;
     char body[160];
     switch (r) {
     case MoveResult::Started:
         snprintf(body, sizeof(body), "%s\n", verb); send_ok(c, body); return;
-    case MoveResult::Clamped: {
-        const int8_t clamp = app::motion::axis_config(axis).limits_active() ? 1 : 0;   // direction shown by the page
-        (void)clamp;
+    case MoveResult::Clamped:
         snprintf(body, sizeof(body), "%s: travel window - will stop at the limit\n", verb); send_ok(c, body); return;
-    }
     case MoveResult::Noop:
         snprintf(body, sizeof(body), "%s: already there\n", verb); send_ok(c, body); return;
     case MoveResult::AtLimit:
@@ -198,14 +180,14 @@ void dispatch(EthernetClient &c, const char *path, const char *query,
         const int a = axis_or_bad(c, query); if (a < 0) return;
         if (!get_param(query, "steps", v, sizeof(v))) { send_bad(c, "missing steps\n"); return; }
         long steps = atol(v);
-        const bool is_jog = path[5] == 'j';
+        const bool is_jog = strcmp(path, "/api/jog") == 0;
         if (is_jog) {
             const int dir = dir_of(query);
             if (dir == 0 || steps <= 0 || steps > 100000000L) { send_bad(c, "bad dir/steps\n"); return; }
             steps *= dir;
         }
         const MoveResult r = app::motion::move_axis(static_cast<uint8_t>(a), static_cast<int32_t>(steps), is_jog, err);
-        reply_move(c, r, err, is_jog ? "jog" : "goto", static_cast<uint8_t>(a)); return;
+        reply_move(c, r, err, is_jog ? "jog" : "goto"); return;
     }
 
     if (strcmp(path, "/api/rotate") == 0) {
@@ -216,7 +198,7 @@ void dispatch(EthernetClient &c, const char *path, const char *query,
         if (dir == 0 || revs <= 0 || revs > 100000L) { send_bad(c, "bad dir/revs\n"); return; }
         const MoveResult r = app::motion::move_axis(static_cast<uint8_t>(a),
                                                     static_cast<int32_t>(dir * revs * app::kStepsPerRev), true, err);
-        reply_move(c, r, err, "rotate", static_cast<uint8_t>(a)); return;
+        reply_move(c, r, err, "rotate"); return;
     }
 
     if (strcmp(path, "/api/run") == 0) {
@@ -225,7 +207,7 @@ void dispatch(EthernetClient &c, const char *path, const char *query,
         if (strcmp(v, "stop") == 0) { app::motion::stop_axis(static_cast<uint8_t>(a), err); send_ok(c, "stopped\n"); return; }
         const int dir = dir_of(query);
         if (dir == 0) { send_bad(c, "bad dir\n"); return; }
-        reply_move(c, app::motion::run_to_end(static_cast<uint8_t>(a), dir, err), err, "run", static_cast<uint8_t>(a)); return;
+        reply_move(c, app::motion::run_to_end(static_cast<uint8_t>(a), dir, err), err, "run"); return;
     }
 
     if (strcmp(path, "/api/stop") == 0) {
@@ -241,7 +223,7 @@ void dispatch(EthernetClient &c, const char *path, const char *query,
 
     // E-STOP latches an alarm (industrial semantics); estop_reset releases it.
     if (strcmp(path, "/api/estop") == 0 || strcmp(path, "/api/estop_reset") == 0) {
-        const bool reset = strlen(path) > 10;   // "/api/estop_reset"
+        const bool reset = strcmp(path, "/api/estop_reset") == 0;
         if (get_param(query, "axis", v, sizeof(v))) {
             const int a = app::motion::resolve_axis(v);
             if (a < 0) { send_bad(c, "bad axis\n"); return; }

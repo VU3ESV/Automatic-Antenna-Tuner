@@ -90,7 +90,6 @@ void setup() {
     // motion::init() before any other peripheral is touched.
     app::motion::init();
 
-    pinMode(LED_BUILTIN, OUTPUT);
     hal::led::init();
     hal::led::set(true);
 
@@ -103,7 +102,7 @@ void setup() {
     Serial.println("Automatic Antenna Tuner — controller");
     Serial.printf("Net backend: %s\n", net_hal::lib_name());
     Serial.println("===========================================");
-    Serial.println("[0] K3 BYPASS latched; drives enabled; config restored from EEPROM:");
+    Serial.println("[0] K3 BYPASS latched; drives enabled; config restored:");
     print_config();
     Serial.println("[1] Serial up.");
     print_mac();

@@ -135,8 +135,8 @@ const char *validate_topology(Topology &t) {
 //   0..3    u32  magic 'ATC1'
 //   4       u8   layout version (2)
 //   8       u8   topology kind
-//   12..15  u32  settings generation (see Persisted::generation)
 //   9       u8   topology element count
+//   12..15  u32  settings generation (see Persisted::generation)
 //   16..39  3 × 8 B element bindings: name[4], type u8, axis u8, pair u8, pad
 //   48..143 3 × 32 B axis records:
 //             +0  i32  position (clean-shutdown anchor)
@@ -160,10 +160,10 @@ constexpr size_t OFF_VERSION    = 4;
 constexpr size_t OFF_TOPO_KIND  = 8;
 constexpr size_t OFF_TOPO_N     = 9;
 constexpr size_t OFF_GENERATION = 12;
-constexpr size_t OFF_ELEMENTS  = 16;
-constexpr size_t ELEM_REC      = 8;
-constexpr size_t OFF_AXES      = 48;
-constexpr size_t AXIS_REC      = 32;
+constexpr size_t OFF_ELEMENTS   = 16;
+constexpr size_t ELEM_REC       = 8;
+constexpr size_t OFF_AXES       = 48;
+constexpr size_t AXIS_REC       = 32;
 constexpr size_t AX_POS = 0, AX_SPEED = 4, AX_ACCEL = 8, AX_KIND = 12, AX_HOME = 13, AX_DIRTY = 14, AX_MAXREV = 16;
 
 static_assert(OFF_AXES + hal::kMaxAxes * AXIS_REC <= hal::nvs::kSize, "NVS layout exceeds store");

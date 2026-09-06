@@ -1414,31 +1414,12 @@ static Axis *findAxis(const char *name) {
 
 // ---- HTTP response helpers ----------------------------------------------
 
-// FNET's default per-socket send buffer is 2 KB (NativeEthernet.h
-// FNET_SOCKET_DEFAULT_SIZE). NativeEthernet's socketSend() has a
-// busy-wait spin (`while(socketSendAvailable(s) < len){}`) that hangs
-// forever if `len` ≥ buffer size — so we MUST chunk every write below
-// the buffer ceiling and flush between chunks to drain it. 1 KB chunks
-// leave plenty of headroom inside the 2 KB buffer.
-//
-// QNEthernet's write() doesn't have this bug but can also return short
-// under lwIP buffer pressure, so the same chunked loop is correct
-// across both backends.
-static constexpr size_t HTTP_WRITE_CHUNK = 1024;
-
-static bool writeAll(EthernetClient &c, const uint8_t *buf, size_t n) {
-    size_t sent = 0;
-    while (sent < n) {
-        if (!c.connected()) return false;
-        size_t want = n - sent;
-        if (want > HTTP_WRITE_CHUNK) want = HTTP_WRITE_CHUNK;
-        size_t w = c.write(buf + sent, want);
-        if (w == 0) return false;
-        sent += w;
-        if (sent < n) c.flush();  // drain so the next chunk has room
-    }
-    return true;
-}
+// Every write goes through net_hal::write_all: chunked below FNET's 2 KB
+// per-socket send buffer and flushed between chunks, because
+// NativeEthernet's socketSend() busy-waits forever on a single write of
+// ≥ that size (QNEthernet can return short too). The bench found this;
+// the helper now lives in the shared library so every sketch gets it.
+using net_hal::write_all;
 
 static void httpSendHeader(EthernetClient &c, int code, const char *status,
                            const char *ctype, int contentLen) {
@@ -1450,20 +1431,20 @@ static void httpSendHeader(EthernetClient &c, int code, const char *status,
                      "Cache-Control: no-store\r\n"
                      "Connection: close\r\n\r\n",
                      code, status, ctype, contentLen);
-    writeAll(c, reinterpret_cast<const uint8_t *>(hdr), n);
+    write_all(c, hdr, n);
 }
 
 static void httpSendText(EthernetClient &c, int code, const char *status,
                          const char *body) {
     const int n = (int)strlen(body);
     httpSendHeader(c, code, status, "text/plain; charset=utf-8", n);
-    writeAll(c, reinterpret_cast<const uint8_t *>(body), n);
+    write_all(c, body, n);
 }
 
 static void httpServeIndex(EthernetClient &c) {
     const int n = (int)(sizeof(INDEX_HTML) - 1);
     httpSendHeader(c, 200, "OK", "text/html; charset=utf-8", n);
-    writeAll(c, reinterpret_cast<const uint8_t *>(INDEX_HTML), n);
+    write_all(c, INDEX_HTML, n);
 }
 
 // Rotate-N job progress for one axis. done/left in revolutions (float);
@@ -1522,7 +1503,7 @@ static void httpServeStatusJson(EthernetClient &c) {
     }
     n += snprintf(json + n, sizeof(json) - n, "]}");
     httpSendHeader(c, 200, "OK", "application/json", n);
-    writeAll(c, reinterpret_cast<const uint8_t *>(json), n);
+    write_all(c, json, n);
 }
 
 // ---- HTTP motion reply --------------------------------------------------

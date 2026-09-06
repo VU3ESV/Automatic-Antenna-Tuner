@@ -29,8 +29,6 @@ h3{margin:.2em 0 .4em;font-weight:300;font-size:1em;color:#aaa}
 .row{display:flex;flex-wrap:wrap;gap:.4em;align-items:center;margin:.4em 0}
 button{background:#2a2a2a;color:#eee;border:1px solid #555;padding:.45em .9em;border-radius:4px;cursor:pointer;font-family:inherit;font-size:.9em}
 button:hover{background:#3a3a3a}
-button.danger{background:#502020;border-color:#933}
-button.danger:hover{background:#702828}
 button.go{background:#1c3a1c;border-color:#494}
 button.go:hover{background:#264826}
 button.sel{background:#3a3a1c;border-color:#aa4}
@@ -39,8 +37,6 @@ input[type=number],select{background:#222;color:#eee;border:1px solid #555;paddi
 select{width:auto}
 .kv{font-size:.85em;color:#aaa}
 .kv b{color:#eee}
-.la{color:#f44;font-weight:bold}
-.lr{color:#4f4}
 .sep{color:#555;margin:0 .4em}
 .bdg{display:none;color:#000;padding:.1em .55em;border-radius:.4em;font-size:.7em;margin-left:.5em;vertical-align:middle;font-weight:bold}
 .bdg.on{display:inline-block}
@@ -48,7 +44,6 @@ select{width:auto}
 .bdg.red{background:#f44;color:#fff;animation:pulse 1s ease-in-out infinite}
 .bdg.run{background:#48c;color:#fff}
 .bdg.dim{background:#555;color:#ddd}
-.bdg.ok{background:#4f4}
 .state{font-size:1.1em;padding:.35em .8em;border-radius:.4em;font-weight:bold;display:inline-block;margin-right:.6em}
 .state.byp{background:#fc3;color:#000}
 .state.eng{background:#4f4;color:#000}

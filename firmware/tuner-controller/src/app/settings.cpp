@@ -37,6 +37,13 @@ void schedule() {
     pending_at = 0;
 }
 
+// Every *settings* change bumps the generation (EEPROM, synchronously);
+// position saves do not — see Persisted::generation.
+void bump_generation() {
+    mirror.generation++;
+    nvs_save_generation(mirror.generation);
+}
+
 } // namespace
 
 // ── JSON codec ──────────────────────────────────────────────────────────
@@ -177,13 +184,6 @@ void init(Persisted &cfg) {
     st.source = from_card ? SettingsSource::Sd : (ee_ok ? SettingsSource::Eeprom : SettingsSource::Defaults);
     mirror    = cfg;
     if (st.sd_present && !from_card) write_card_now();   // create / repair the card copy
-}
-
-namespace {
-void bump_generation() {
-    mirror.generation++;
-    nvs_save_generation(mirror.generation);
-}
 }
 
 void save_topology(const Topology &t) {

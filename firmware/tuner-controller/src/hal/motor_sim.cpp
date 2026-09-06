@@ -21,8 +21,8 @@ constexpr int32_t kStepsPerTick = 32;
 struct AxisState {
     int32_t  pos     = 0;
     int32_t  tgt     = 0;
-    uint32_t speed   = 25600;
-    uint32_t accel   = 25600;
+    uint32_t speed   = kDefaultSpeed;
+    uint32_t accel   = kDefaultAccel;
     bool     enabled = true;
 };
 

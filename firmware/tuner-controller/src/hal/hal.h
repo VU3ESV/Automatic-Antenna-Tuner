@@ -41,6 +41,14 @@ using Axis = uint8_t;
 enum class SideSel : uint8_t { HiZ, LoZ };
 
 namespace motor {
+    // Pulse-rate ceiling (FlexPWM / iHSS60: 200 kHz) and the speed /
+    // ramp a driver runs at before the app restores its persisted
+    // settings. app/config.h derives its defaults from these so the
+    // numbers exist in exactly one place.
+    constexpr uint32_t kMaxSpeed     = 200000;   // steps/s
+    constexpr uint32_t kDefaultSpeed = 25600;    // steps/s — 4 rev/s at 6400 p/r (bench-proven cruise)
+    constexpr uint32_t kDefaultAccel = 25600;    // steps/s²
+
     // Configure pins / pulse generators; drivers come up ENABLED and
     // stay enabled while powered (CLAUDE.md invariant 3 — a direct-
     // coupled vacuum capacitor must never be free to back-drive).
@@ -70,7 +78,7 @@ namespace motor {
     // position and target are set so the axis sits still.
     void     set_position(Axis a, int32_t value);
 
-    // Per-axis cruise speed (steps/s, 1..200000) and ramp rate
+    // Per-axis cruise speed (steps/s, 1..kMaxSpeed) and ramp rate
     // (steps/s²). Persisted by the app layer, not the HAL.
     void     set_speed(Axis a, uint32_t steps_per_s);
     void     set_accel(Axis a, uint32_t steps_per_s2);

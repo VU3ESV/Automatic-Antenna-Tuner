@@ -50,8 +50,8 @@ bool parse_args_move_axis(const char *line, size_t line_len,
 // run — {"axis": .., "dir": "cw"|"ccw"|1|-1}.
 bool parse_args_run(const char *line, size_t line_len, char axis[kAxisArgLen], int &dir);
 
-// stop / set_home / unset_home — {"axis": ..}. For `stop` the axis is optional
-// (returns true with axis[0] == '\0' meaning "all").
+// stop / estop / estop_reset / set_home / unset_home — {"axis": ..}. When
+// `required` is false a missing axis is accepted (axis[0] == '\0' = "all").
 bool parse_args_axis(const char *line, size_t line_len, char axis[kAxisArgLen], bool required);
 
 // set_element — {"axis": .., "kind": "vacuum_cap"|2, "max_rev": 40}.

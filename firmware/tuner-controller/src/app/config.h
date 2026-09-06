@@ -72,10 +72,10 @@ bool        parse_element_kind(const char *s, ElementKind &out);   // name or di
 bool        kind_has_stops(ElementKind k);
 
 constexpr float    kMaxRatedRev   = 100000.0f;   // sanity bound, not a real limit
-constexpr uint32_t kMaxSpeedHz    = 200000;      // FlexPWM / iHSS60 pulse ceiling
+constexpr uint32_t kMaxSpeedHz    = hal::motor::kMaxSpeed;      // pulse ceiling, owned by the HAL
 constexpr uint32_t kMaxAccelHz2   = 10000000;
-constexpr uint32_t kDefaultSpeed  = 25600;      // 4 rev/s at 6400 p/r (bench-proven cruise rate)
-constexpr uint32_t kDefaultAccel  = 25600;
+constexpr uint32_t kDefaultSpeed  = hal::motor::kDefaultSpeed;  // what a fresh axis record gets
+constexpr uint32_t kDefaultAccel  = hal::motor::kDefaultAccel;
 
 struct AxisConfig {
     ElementKind kind     = ElementKind::Unset;

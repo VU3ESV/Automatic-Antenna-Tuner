@@ -332,7 +332,8 @@ because:
 A small shared PlatformIO library, `firmware/lib/net_hal/`, exposes the *only*
 Ethernet operations the firmware uses — `begin`, `wait_link`,
 `wait_dhcp`, `link_state`, `link_speed_mbps`, `link_full_duplex`,
-`hw_mac`, `lib_name` — plus a typedef so callers see
+`hw_mac`, `lib_name`, and the chunked `write_all` every server sends
+through — plus a typedef so callers see
 `EthernetClient` / `EthernetServer` regardless of backend namespace.
 Two implementation files under `#ifdef` guards:
 
