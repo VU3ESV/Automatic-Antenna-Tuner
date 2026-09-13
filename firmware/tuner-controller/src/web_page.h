@@ -77,7 +77,7 @@ button.estop.down:active{transform:translateY(0)}
 </style></head>
 <body>
 <h1>Antenna Tuner Controller</h1>
-<div class="top">backend <b id="be">?</b> <span class="sep">·</span> ip <b id="ip">?</b> <span class="sep">·</span> link <b id="ln">?</b> <span class="sep">·</span> master clients <b id="mc">?</b> <span class="sep">·</span> homed <b id="hm">?</b> <span class="sep">·</span> fwd <b id="fw">?</b> W <span class="sep">·</span> settings <b id="stg">?</b> <a href="/api/settings" target="_blank" style="color:#8bf">view config</a> <a href="/api/settings?src=card" target="_blank" style="color:#8bf">read card</a> <button onclick="cmd('/api/settings_save','net')" style="padding:.1em .5em;font-size:.85em">save to card now</button> <span class="sep">·</span> build <b id="bld">?</b></div>
+<div class="top">backend <b id="be">?</b> <span class="sep">·</span> host <b id="hn">?</b> <span class="sep">·</span> ip <b id="ip">?</b> <span class="sep">·</span> link <b id="ln">?</b> <span class="sep">·</span> master clients <b id="mc">?</b> <span class="sep">·</span> homed <b id="hm">?</b> <span class="sep">·</span> fwd <b id="fw">?</b> W <span class="sep">·</span> settings <b id="stg">?</b> <a href="/api/settings" target="_blank" style="color:#8bf">view config</a> <a href="/api/settings?src=card" target="_blank" style="color:#8bf">read card</a> <button onclick="cmd('/api/settings_save','net')" style="padding:.1em .5em;font-size:.85em">save to card now</button> <span class="sep">·</span> build <b id="bld">?</b></div>
 
 <div class="panel" id="net">
   <div class="row">
@@ -174,6 +174,7 @@ function applyTopo(){const k=document.getElementById('tkind').value;
 function render(s){
   if(!s)return;last=s;
   document.getElementById('be').textContent=s.net.backend;
+  document.getElementById('hn').textContent=s.net.hostname?s.net.hostname+'.local':'—';
   document.getElementById('ip').textContent=s.net.ip;
   document.getElementById('ln').textContent=s.net.link;
   document.getElementById('mc').textContent=s.net.master_clients;

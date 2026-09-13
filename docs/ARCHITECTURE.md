@@ -285,6 +285,7 @@ the firmware is structured so the choice is a one-line change.
 | Namespace                      | `qindesign::network` (must `using namespace` or qualify) | Global |
 | Link-state API                 | `Ethernet.linkState()`, `waitForLink(ms)`, `linkInfo().{speed,fullNotHalfDuplex}` | `Ethernet.linkStatus()` (enum), poll manually |
 | DHCP wait                      | `Ethernet.waitForLocalIP(ms)` separate from `begin()` | DHCP blocks inside `begin(mac)` |
+| Hostname on the LAN            | `Ethernet.setHostname()` before `begin()` → DHCP option 12 (router list, reverse DNS), plus lwIP mDNS `<name>.local` | Stock FNET's DHCP client sends **no** hostname option — the tuner-controller patches it at build time (`tools/fnet_dhcp_hostname.py`, pinned to FNET 0.1.3); mDNS `<name>.local` via FNET's responder called directly (NativeEthernet's `MDNS.addService()` passes FNET an uninitialised name) |
 | Binary footprint (selftest, measured 2026-05) | 180 KB flash · 28 KB RAM1 vars · 56 KB RAM2 vars | 110 KB flash · 15 KB RAM1 vars · 12 KB RAM2 vars |
 | Portability to STM32H743       | **Direct** — lwIP is the standard embedded TCP/IP stack on STM32 (CubeMX, `stm32duino`) | **None** — FNET is Teensy-specific |
 | Ham-radio-Teensy ecosystem use | Newer / less common in this niche | **Dominant** — Morconi, TeensyMaestro, IW7DMH's `FlexRigTeensy` library all use NativeEthernet |

@@ -6,7 +6,8 @@
 //        topology, element config and position anchors (invariant 3) and
 //        enables the drives.
 //   [1]  USB serial, LED solid.
-//   [2]  Ethernet PHY link + DHCP via the configured net_hal backend.
+//   [2]  Ethernet PHY link + DHCP via the configured net_hal backend;
+//        mDNS answers <TUNER_HOSTNAME>.local (default tuner-controller).
 //   [3]  Master link: TCP line-JSON server on port 8089 (docs/PROTOCOL.md).
 //   [4]  Browser control: HTTP server + embedded page on port 80.
 //   [5]  Loop: service motion, publish the snapshot, tick both servers,
@@ -112,7 +113,7 @@ void setup() {
     print_mac();
 
     Serial.printf("[2] Bringing up Ethernet via %s...\n", net_hal::lib_name());
-    if (!net_hal::begin()) Serial.println("    !! net_hal::begin() returned false. Check PHY/cable.");
+    if (!net_hal::begin(net_hal::kHostname)) Serial.println("    !! net_hal::begin() returned false. Check PHY/cable.");
     Serial.print("    waiting for link...");
     linkUp = net_hal::wait_link(LINK_TIMEOUT_MS);
     Serial.println(linkUp ? " up" : " TIMED OUT");
@@ -120,16 +121,21 @@ void setup() {
     if (net_hal::wait_dhcp(DHCP_TIMEOUT_MS)) {
         dhcpOK = true;
         print_net();
+        const bool mdns = net_hal::start_mdns(net_hal::kHostname, http_server::kPort);
+        Serial.printf("Host:    %s.local%s%s\n", net_hal::hostname(),
+                      mdns ? " (mDNS)" : "  !! mDNS responder failed to start",
+                      net_hal::dhcp_sends_hostname() ? ", also sent as the DHCP hostname" : "");
     } else {
         Serial.println("    !! DHCP timed out. Motion still works from the master once the link returns.");
     }
 
     if (dhcpOK) {
         tuner_server::begin();
-        Serial.printf("[3] Master link: TCP :%u  (set master [tuner].host = \"" IP_FMT "\")\n",
-                      tuner_server::kListenPort, IP_ARG(Ethernet.localIP()));
+        Serial.printf("[3] Master link: TCP :%u  (set master [tuner].host = \"%s.local\" or \"" IP_FMT "\")\n",
+                      tuner_server::kListenPort, net_hal::hostname(), IP_ARG(Ethernet.localIP()));
         http_server::begin();
-        Serial.printf("[4] Browser UI:  http://" IP_FMT "/\n", IP_ARG(Ethernet.localIP()));
+        Serial.printf("[4] Browser UI:  http://%s.local/  (http://" IP_FMT "/)\n",
+                      net_hal::hostname(), IP_ARG(Ethernet.localIP()));
     }
 
     Serial.println("===========================================");

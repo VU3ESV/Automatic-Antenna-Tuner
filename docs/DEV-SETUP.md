@@ -197,10 +197,25 @@ recovery. After that the controller reflashes itself over Ethernet:
 
 ```sh
 cd firmware/tuner-controller
-pio run -e teensy41_native_ota -t upload                 # board at the address in platformio.ini
-pio run -e teensy41_native_ota -t upload --upload-port 192.168.86.44
-python3 tools/ota_upload.py --host 192.168.86.44 .pio/build/teensy41_native/firmware.hex
+pio run -e teensy41_native_ota -t upload                 # board at tuner-controller.local
+pio run -e teensy41_native_ota -t upload --upload-port 192.168.86.28   # or by address
+python3 tools/ota_upload.py --host tuner-controller.local .pio/build/teensy41_native/firmware.hex
 ```
+
+**Finding the controller.** It announces itself over mDNS as
+`tuner-controller.local` (`TUNER_HOSTNAME` in `firmware/lib/net_hal/src/net_hal.h`;
+override with `build_flags = '-DTUNER_HOSTNAME="name"'`), with its web UI
+advertised as `_http._tcp`. macOS resolves `.local` natively; on Linux
+(the Pi master) install `avahi-daemon` and `libnss-mdns`. The DHCP address
+itself can change between leases. The controller also sends the name as
+its DHCP hostname, so routers that register DHCP names list it, resolve
+`tuner-controller.lan`, and answer the reverse lookup IP scanners use.
+QNEthernet does this natively. Stock FNET (NativeEthernet) has no hostname
+option, so `tools/fnet_dhcp_hostname.py` patches FNET's DHCP client at
+build time — pinned to FNET 0.1.3 by SHA-256, so a different FNET fails
+the build instead of silently dropping the name. If `.local` does not
+resolve, find the address by the PJRC MAC prefix:
+`arp -a | grep -i 4:e9:e5`.
 
 The uploader stages the hex on the controller, compares the controller's
 CRC-32 of the staged image with the file, asks it to apply, and prints
