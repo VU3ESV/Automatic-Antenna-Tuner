@@ -88,6 +88,17 @@ struct AxisConfig {
     bool    limits_active() const { return kind_has_stops(kind) && home_set && max_steps() > 0; }
 };
 
+// ── Drive feedback (iHSS60 PED / ALM) ───────────────────────────────────
+
+// Which drive feedback signals are wired and supervised by app::motion
+// (docs/HW-T41-PINMAP.md §2.2). Both off by default: with nothing wired a
+// missing PED would read as "never arrived" and clear every home. The
+// operator enables each once its wiring is complete; persisted.
+struct FeedbackConfig {
+    bool ped = false;   // PED (arrive position) of every topology-bound motor
+    bool alm = false;   // ALM of every drive, in parallel on one input
+};
+
 // ── Persistence ─────────────────────────────────────────────────────────
 
 // Where the running configuration came from at boot (app/settings.h).
@@ -101,6 +112,7 @@ struct Persisted {
     uint32_t   generation = 0;
     Topology   topology;
     AxisConfig axis[hal::kMaxAxes];
+    FeedbackConfig feedback;             // drive feedback supervision (off by default)
     int32_t    position[hal::kMaxAxes] = {0, 0, 0};
     // true = a move was in flight when this record was last written, so
     // the position is not a clean-shutdown anchor (invariant 3).
@@ -114,6 +126,7 @@ void nvs_format(const Persisted &p);
 void nvs_save_topology(const Topology &t);
 void nvs_save_axis(uint8_t axis, const AxisConfig &c);
 void nvs_save_generation(uint32_t generation);
+void nvs_save_feedback(const FeedbackConfig &f);
 void nvs_save_position(uint8_t axis, int32_t pos, bool dirty);
 
 } // namespace app

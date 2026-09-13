@@ -78,6 +78,29 @@ as `ota` (`state` idle / receiving / staged / applying / error,
 the `teensy41_ota` / `teensy41_native_ota` PlatformIO environments.
 Rules in CLAUDE.md "Firmware update over Ethernet".
 
+**Drive feedback (since 2026-09-13).** Supervision of the iHSS60
+closed-loop drives' opto outputs — PED ("arrive position") per motor and
+ALM (alarm) of every drive in parallel; wiring and pins in
+`docs/HW-T41-PINMAP.md` §2.2. **Off by default.** `GET
+/api/feedback?ped=0|1&alm=0|1` (either parameter) enables or disables
+each signal once its wiring is done; persisted in EEPROM and in
+`config.json` (`"feedback": {"ped", "alm"}`), refused `moving` while an
+axis runs or a finished move still awaits PED confirmation (the same
+gate applies to `set_topology` and to firmware upload / apply). `/api/status` reports `feedback` (`ped`, `alm` — enabled;
+`alarm` — live ALM level) and per axis `ped` (live level, also while
+disabled, for checking the wiring) and `drive_fault` (`""`, `no_arrival`,
+`drive_lost`, `alarm`). With PED on: a finished move is saved as a clean
+anchor only after the drive reports arrival within 2 s, otherwise the
+element's home is cleared (`no_arrival` — stall, alarm or no motor
+power); PED off for 250 ms at rest, after the drive had reported ready,
+clears home (`drive_lost`); PED off at rest refuses motion verbs with
+`drive_not_ready` (a boot with motor power off keeps home but waits for
+PED). With ALM on: an alarm cuts pulses on every axis at once and, held
+20 ms, clears home on every bound element (`alarm`); motion verbs are
+refused `drive_alarm` while it is active. A `drive_fault` stays until
+home is declared again on that axis. Both refusal codes apply to the
+master link's motion verbs too; the setting itself is HTTP-only for now.
+
 ## 1. Framing
 
 - Browser↔Master: one WebSocket text frame per protocol frame. No
@@ -283,6 +306,8 @@ and controller emit these.
 | Code            | Meaning                                                 |
 |-----------------|---------------------------------------------------------|
 | `rf_lockout`    | Motion refused while RF present.                        |
+| `drive_alarm`   | Motion refused while a drive's ALM is active (drive feedback enabled). |
+| `drive_not_ready` | Motion refused: PED supervision is on and the drive does not report arrival at rest — motor power, cable or drive fault. |
 | `enc_resync`    | Encoder count diverged from step counter; re-synced.    |
 | `stall`         | StallGuard triggered during motion.                     |
 | `relay_fault`   | K1+K2 closed simultaneously, or readback mismatch.      |
@@ -395,6 +420,7 @@ handles master-bound verbs locally.
 | Verb refused due to invariant (RF lockout)  | `ack ok:false` with the relevant `code` (e.g. `rf_lockout`).                 |
 | Motion refused by the anchoring / travel rules | `ack ok:false` with `not_anchored`, `at_limit`, `kind_unset`, `bad_axis`. |
 | Motion refused because an E-stop alarm is latched | `ack ok:false` with `estop`; send `estop_reset` first. |
+| Motion refused by drive feedback (PED / ALM) | `ack ok:false` with `drive_alarm` or `drive_not_ready`; a confirmed fault also clears home on the affected elements (`homed:false`). |
 | Topology / side verbs                       | `ack ok:false` with `wrong_topology`, `not_bypassed`, `moving`, `duplicate_axis`, `bad_axis`, `bad_elements`. |
 | Server overloaded / client too slow         | `status code:ws_overrun`, close with code 1013 (try again later).            |
 | Heartbeat absent for 3× `heartbeat_ms`      | Either side closes; client-side reconnect loop kicks in (1 s→30 s backoff). |

@@ -27,6 +27,8 @@
 //   element?axis&kind&max_rev        element kind + rated travel
 //   speed?axis&v[&acc]               cruise speed / ramp
 //   enable?axis&on=1|0               driver ENA (setup only)
+//   feedback?ped=0|1&alm=0|1         drive feedback supervision (iHSS60 PED / ALM), saved;
+//                                    off by default — enable once wired
 //   side?v=hi_z|lo_z                 K1/K2 (Balanced L)
 //   bypass?on=1|0                    K3
 //   home                             every bound axis back to 0

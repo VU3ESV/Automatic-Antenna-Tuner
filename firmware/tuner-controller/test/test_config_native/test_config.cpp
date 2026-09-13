@@ -129,6 +129,59 @@ void test_blank_store_yields_defaults() {
     TEST_ASSERT_TRUE(app::nvs_load(q));   // defaults were written back
 }
 
+void test_feedback_flags_round_trip() {
+    app::Persisted p;
+    p.topology = app::Topology::default_balanced_l();
+    p.feedback.ped = true;
+    app::nvs_format(p);
+    app::Persisted q;
+    TEST_ASSERT_TRUE(app::nvs_load(q));
+    TEST_ASSERT_TRUE(q.feedback.ped);
+    TEST_ASSERT_FALSE(q.feedback.alm);
+    app::FeedbackConfig f;
+    f.alm = true;
+    app::nvs_save_feedback(f);
+    TEST_ASSERT_TRUE(app::nvs_load(q));
+    TEST_ASSERT_FALSE(q.feedback.ped);
+    TEST_ASSERT_TRUE(q.feedback.alm);
+}
+
+void test_record_without_feedback_byte_reads_off() {
+    // A record written by firmware from before drive feedback existed: every
+    // setting present, byte 5 never written (erased flash reads 0xFF). It
+    // must load as-is — same layout version, nothing reset — with feedback off.
+    app::Persisted p;
+    p.generation       = 19;
+    p.topology         = app::Topology::default_balanced_pi();
+    p.axis[0].kind     = app::ElementKind::VacuumCap;
+    p.axis[0].home_set = true;
+    p.axis[0].max_rev  = 40.0f;
+    p.position[0]      = 128000;
+    p.feedback.ped     = true;
+    app::nvs_format(p);
+    const uint8_t erased = 0xFF;
+    hal::nvs::write(5, &erased, 1);      // the feedback byte as older firmware leaves it
+    app::Persisted q;
+    TEST_ASSERT_TRUE(app::nvs_load(q));
+    TEST_ASSERT_FALSE(q.feedback.ped);
+    TEST_ASSERT_FALSE(q.feedback.alm);
+    TEST_ASSERT_EQUAL_UINT32(19, q.generation);
+    TEST_ASSERT_TRUE(q.topology.kind == app::TopologyKind::BalancedPi);
+    TEST_ASSERT_TRUE(q.axis[0].kind == app::ElementKind::VacuumCap);
+    TEST_ASSERT_TRUE(q.axis[0].home_set);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 40.0f, q.axis[0].max_rev);
+    TEST_ASSERT_EQUAL_INT32(128000, q.position[0]);
+    uint8_t ver = 0;
+    hal::nvs::read(4, &ver, 1);
+    TEST_ASSERT_EQUAL_UINT8(2, ver);     // no layout bump: older firmware still accepts this record
+    // Flag bits without the marker are not a configuration either.
+    const uint8_t bare = 0x03;
+    hal::nvs::write(5, &bare, 1);
+    TEST_ASSERT_TRUE(app::nvs_load(q));
+    TEST_ASSERT_FALSE(q.feedback.ped);
+    TEST_ASSERT_FALSE(q.feedback.alm);
+}
+
 int main(int, char **) {
     UNITY_BEGIN();
     RUN_TEST(test_defaults_validate);
@@ -136,5 +189,7 @@ int main(int, char **) {
     RUN_TEST(test_element_kind_helpers);
     RUN_TEST(test_nvs_round_trip);
     RUN_TEST(test_blank_store_yields_defaults);
+    RUN_TEST(test_feedback_flags_round_trip);
+    RUN_TEST(test_record_without_feedback_byte_reads_off);
     return UNITY_END();
 }

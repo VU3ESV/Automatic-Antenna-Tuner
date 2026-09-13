@@ -25,6 +25,10 @@ uint32_t sim_applied_size();
 void     sim_reset();
 }
 namespace hal::sdcard { void sim_format(); }
+namespace hal::feedback {
+void sim_set_stalled(hal::Axis a, bool on);
+void sim_reset();
+}
 
 namespace {
 
@@ -82,6 +86,7 @@ void setUp() {
     hal::relay::init();
     hal::motor::init();
     hal::safety::init();
+    hal::feedback::sim_reset();
     // A test may end with an apply pending; let it run so abort() is not refused.
     if (app::ota::apply_pending()) { app::ota::tick(1); app::ota::tick(1000); }
     hal::firmware::sim_reset();
@@ -422,6 +427,45 @@ void test_motion_verbs_refused_while_apply_pending() {
     app::motion::stop_all();
 }
 
+void test_apply_waits_for_drive_arrival_confirmation() {
+    // PED supervision on: a finished move is recorded only once the drive
+    // confirms arrival. An update applied before that would reboot with the
+    // move marked in flight and clear home at the next boot.
+    hal::nvs::init();
+    hal::sdcard::sim_format();
+    app::Persisted p;
+    p.topology = app::Topology::default_balanced_l();
+    app::nvs_format(p);
+    app::motion::init();
+    app::Snapshot snap;
+    app::motion::tick(1, snap);
+    TEST_ASSERT_TRUE(app::motion::set_home(0, err));
+    app::FeedbackConfig f;
+    f.ped = true;
+    TEST_ASSERT_TRUE(app::motion::set_feedback(f, err));
+    app::motion::tick(2, snap);
+    TEST_ASSERT_TRUE(stage(sample_hex(sample_image()), 100000));
+
+    TEST_ASSERT_TRUE(app::motion::accepted(app::motion::move_axis(0, 64, true, err)));
+    hal::feedback::sim_set_stalled(0, true);
+    for (uint32_t t = 3; t < 10; t++) app::motion::tick(t, snap);   // pulses done, arrival pending
+    TEST_ASSERT_FALSE(snap.moving);
+    TEST_ASSERT_TRUE(app::motion::any_motion_pending());
+    TEST_ASSERT_FALSE(app::ota::request_apply(6, err));
+    TEST_ASSERT_EQUAL_STRING("moving", err.code);
+
+    hal::feedback::sim_set_stalled(0, false);
+    app::motion::tick(10, snap);                                   // arrival confirmed → recorded
+    TEST_ASSERT_FALSE(app::motion::any_motion_pending());
+    TEST_ASSERT_TRUE(snap.axes[0].anchored);
+    TEST_ASSERT_TRUE(app::ota::request_apply(6, err));
+    app::ota::tick(100);
+    app::ota::tick(600);
+    TEST_ASSERT_TRUE(hal::firmware::sim_applied());
+    f.ped = false;                                                 // leave the store as the other tests expect
+    TEST_ASSERT_TRUE(app::motion::set_feedback(f, err));
+}
+
 int main(int, char **) {
     UNITY_BEGIN();
     RUN_TEST(test_crc32_reference_vector);
@@ -445,5 +489,6 @@ int main(int, char **) {
     RUN_TEST(test_abort_refused_while_moving_or_applying);
     RUN_TEST(test_apply_gates_rechecked_when_due);
     RUN_TEST(test_motion_verbs_refused_while_apply_pending);
+    RUN_TEST(test_apply_waits_for_drive_arrival_confirmation);
     return UNITY_END();
 }

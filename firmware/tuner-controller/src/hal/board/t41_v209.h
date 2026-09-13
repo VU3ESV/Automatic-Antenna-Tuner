@@ -49,8 +49,8 @@ constexpr axis_pins_t AXIS_Z  = { 6,  7,  39, 22 };
 // topology. Reserved for bandswitch / antenna-select / future
 // expansion. Captured here so the pin numbers don't have to be
 // re-discovered later.
-constexpr axis_pins_t AXIS_M3 = { 8,  9,  38, 23 };
-constexpr axis_pins_t AXIS_M4 = { 26, 27, 37, 28 };
+constexpr axis_pins_t AXIS_M3 = { 8,  9,  38, 23 };   // limit input 23 now carries motor-X PED (FEEDBACK_PED)
+constexpr axis_pins_t AXIS_M4 = { 26, 27, 37, 28 };   // limit input 28 now carries motor-Y PED (FEEDBACK_PED)
 
 constexpr uint8_t NUM_AXES_WIRED = 5;
 constexpr uint8_t NUM_AXES_TUNER = 3;  // max under any supported topology
@@ -85,11 +85,25 @@ constexpr uint8_t RELAY_K3_BYPASS = 19;  // COOLANT FLOOD (latched at power-up)
 // Five opto-isolated inputs the carrier exposes as RESET / PROBE /
 // FEED_HOLD / CYCLE_START / SAFETY_DOOR for CNC use. The tuner reuses
 // them for its own operational signals — see docs/HW-T41-PINMAP.md §3.
+// PROBE (15) and SAFETY_DOOR (29) carry drive feedback — see below.
 constexpr uint8_t INPUT_OPERATOR_RESET = 14;  // RESET       — operator panic
-constexpr uint8_t INPUT_RF_PRESENCE    = 15;  // PROBE       — external RF-detect (spare)
 constexpr uint8_t INPUT_TX_PANIC       = 16;  // FEED_HOLD   — hardware TX-key lockout
 constexpr uint8_t INPUT_ENGAGE         = 17;  // CYCLE_START — engage from bypass
-constexpr uint8_t INPUT_INTERLOCK      = 29;  // SAFETY_DOOR — enclosure interlock
+
+// ── Drive feedback inputs (iHSS60 PED / ALM) ──────────────────────────
+// docs/HW-T41-PINMAP.md §2.2. PED (arrive position) of each tuner motor
+// channel on the spare A / B limit inputs and PROBE; ALM (alarm) of every
+// drive wired in parallel to SAFETY_DOOR. The drive outputs are opto
+// transistors wired + → input Sig, − → Gnd, so conducting = LOW. With the
+// drive defaults P14 = 1 (PED conducts when arrived) and P10 = 0 (ALM
+// conducts on fault) LOW = arrived and LOW = alarm; an unpowered drive
+// leaves both open. Displaces the RF-presence spare (15) and the
+// enclosure interlock (29). If P10 is ever set to 1, wire the ALMs in
+// series instead and flip ALM_ACTIVE_LOW.
+constexpr uint8_t FEEDBACK_PED[NUM_AXES_TUNER] = { 23, 28, 15 };   // motor X, Y, Z
+constexpr uint8_t FEEDBACK_ALM                 = 29;               // every drive's ALM in parallel
+constexpr bool    PED_ACTIVE_LOW               = true;
+constexpr bool    ALM_ACTIVE_LOW               = true;
 
 // ── Quadrature encoder inputs (X axis, mux'd with AUXINPUT1..3) ───────
 // Reserved for an external QEI on a non-integrated motor (Phase-2

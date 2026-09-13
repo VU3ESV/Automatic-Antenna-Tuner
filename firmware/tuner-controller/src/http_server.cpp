@@ -171,12 +171,14 @@ void send_status(EthernetClient &c, const app::Snapshot &s, int master_clients) 
         n = (w < 0 || n + w >= static_cast<int>(cap)) ? static_cast<int>(cap) : n + w;
     }
     n = put(json, cap, n,
-        ",\"side\":\"%s\",\"bypass\":%s,\"moving\":%s,\"homed\":%s,\"rf_lockout\":%s,\"estop_all\":%s,\"fwd_w\":%.1f,"
+        ",\"side\":\"%s\",\"bypass\":%s,\"moving\":%s,\"homed\":%s,\"rf_lockout\":%s,\"estop_all\":%s,\"feedback\":{\"ped\":%s,\"alm\":%s,\"alarm\":%s},\"fwd_w\":%.1f,"
         "\"settings\":{\"source\":\"%s\",\"sd_present\":%s,\"sd_ok\":%s,\"sd_saves\":%lu},"
         "\"last_move_ms\":%lu,\"axes\":[",
         s.side == app::Side::HiZ ? "hi_z" : "lo_z",
         s.bypass ? "true" : "false", s.moving ? "true" : "false", s.homed ? "true" : "false",
-        s.rf_lockout ? "true" : "false", s.estop_all ? "true" : "false", static_cast<double>(s.fwd_w),
+        s.rf_lockout ? "true" : "false", s.estop_all ? "true" : "false",
+        s.feedback_ped ? "true" : "false", s.feedback_alm ? "true" : "false", s.drive_alarm ? "true" : "false",
+        static_cast<double>(s.fwd_w),
         s.settings_source == app::SettingsSource::Sd ? "sd" : s.settings_source == app::SettingsSource::Eeprom ? "eeprom" : "defaults",
         s.sd_present ? "true" : "false", s.sd_ok ? "true" : "false",
         static_cast<unsigned long>(app::settings::status().sd_saves),
@@ -188,13 +190,13 @@ void send_status(EthernetClient &c, const app::Snapshot &s, int master_clients) 
         n = put(json, cap, n,
             "%s{\"axis\":%u,\"letter\":\"%s\",\"name\":\"%s\",\"steps\":%ld,\"enc\":%ld,\"moving\":%s,\"enabled\":%s,"
             "\"limit_sw\":%s,\"kind\":\"%s\",\"home_set\":%s,\"anchored\":%s,\"max_rev\":%.3f,\"max_steps\":%ld,"
-            "\"travel\":\"%s\",\"last_clamp\":\"%s\",\"estop\":%s,\"turns\":%.3f,\"speed\":%lu,\"accel\":%lu}",
+            "\"travel\":\"%s\",\"last_clamp\":\"%s\",\"estop\":%s,\"ped\":%s,\"drive_fault\":\"%s\",\"turns\":%.3f,\"speed\":%lu,\"accel\":%lu}",
             a ? "," : "", a, axis_letter(a), name, static_cast<long>(x.steps), static_cast<long>(x.enc),
             x.moving ? "true" : "false", x.enabled ? "true" : "false", x.limit_sw ? "true" : "false",
             app::element_kind_name(x.kind), x.home_set ? "true" : "false", x.anchored ? "true" : "false",
             static_cast<double>(x.max_rev), static_cast<long>(x.max_steps), app::travel_name(x.travel),
             x.last_clamp > 0 ? "max" : (x.last_clamp < 0 ? "home" : "none"),
-            x.estop ? "true" : "false",
+            x.estop ? "true" : "false", x.ped ? "true" : "false", app::drive_fault_name(x.drive_fault),
             static_cast<double>(x.steps) / static_cast<double>(app::kStepsPerRev),
             static_cast<unsigned long>(x.speed), static_cast<unsigned long>(x.accel));
     }
@@ -316,6 +318,19 @@ void dispatch(EthernetClient &c, const char *path, const char *query,
         get_param(query, "on", v, sizeof(v));
         if (!app::motion::set_enabled(static_cast<uint8_t>(a), strcmp(v, "1") == 0, err)) { send_refusal(c, err); return; }
         send_ok(c, "driver\n"); return;
+    }
+
+    // Drive feedback supervision (iHSS60 PED / ALM) — off until the wiring is done.
+    if (strcmp(path, "/api/feedback") == 0) {
+        app::FeedbackConfig f = app::motion::feedback();
+        bool given = false;
+        if (get_param(query, "ped", v, sizeof(v))) { f.ped = strcmp(v, "1") == 0; given = true; }
+        if (get_param(query, "alm", v, sizeof(v))) { f.alm = strcmp(v, "1") == 0; given = true; }
+        if (!given) { send_bad(c, "give ped=0|1 and/or alm=0|1\n"); return; }
+        if (!app::motion::set_feedback(f, err)) { send_refusal(c, err); return; }
+        char body[96];
+        snprintf(body, sizeof(body), "drive feedback saved: PED %s, ALM %s\n", f.ped ? "on" : "off", f.alm ? "on" : "off");
+        send_ok(c, body); return;
     }
 
     if (strcmp(path, "/api/side") == 0) {

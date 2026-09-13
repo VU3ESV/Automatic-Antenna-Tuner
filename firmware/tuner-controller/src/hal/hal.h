@@ -14,6 +14,7 @@
 //                                              |   trapezoidal ramp, iHSS60 timing
 //   relay    sim                               | teensy41: carrier relay-driver outputs
 //   limits   sim                               | teensy41: carrier opto inputs
+//   feedback sim (test hooks)                  | teensy41: iHSS60 PED / ALM opto inputs
 //   nvs      sim (RAM)                         | teensy41: emulated EEPROM
 //   sdcard   sim (RAM files)                   | teensy41: built-in microSD (SD.h)
 //   encoder  passthrough of the motor counter on every target (the iHSS60
@@ -122,6 +123,26 @@ namespace limits {
     // trip handling (invariant 7) lands with the lead-screw mechanism;
     // for now the app reports the level.
     bool     active(Axis a);
+}
+
+namespace feedback {
+    // iHSS60 closed-loop drive feedback (docs/HW-T41-PINMAP.md §2.2). Both
+    // outputs are opto transistors lit by the drive's own electronics, so
+    // an unpowered drive reads "not arrived" and "no alarm". Whether the
+    // signals are wired and supervised is the app's (app::FeedbackConfig,
+    // off by default); the HAL only reports levels.
+    void     init();
+
+    // PED (arrive position) of the drive on this carrier channel: true when
+    // the drive reports the shaft at the commanded position (drive default
+    // P14 = 1). False while moving, and when the drive is unpowered,
+    // faulted, or the cable is open.
+    bool     arrived(Axis a);
+
+    // ALM of every drive, wired in parallel to one input: true while any of
+    // them reports a fault — over-current, over-voltage, following error
+    // (drive default P10 = 0, which is blind to a loss of motor power).
+    bool     alarm();
 }
 
 namespace relay {

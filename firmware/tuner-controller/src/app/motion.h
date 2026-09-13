@@ -11,6 +11,7 @@
 //                                      and last shutdown clean); unanchored
 //                                      axes move only in bypass (setup)
 //   #7 travel window (soft limits)   — clamp_target() for every verb
+//   #3/#7 drive feedback (opt-in)    — iHSS60 PED confirms arrival, ALM stops
 //
 // Application-layer code only; no platform headers, no JSON.
 
@@ -95,6 +96,17 @@ bool set_enabled(uint8_t axis, bool on, Refusal &err);
 // motion; persisted, applied immediately.
 bool set_topology(Topology t, Refusal &err);
 
+// Drive feedback supervision — iHSS60 PED (arrive position) per motor and
+// ALM of every drive (docs/HW-T41-PINMAP.md §2.2). Off by default; enable
+// each signal once it is wired. Persisted (EEPROM + card); refused `moving`
+// while an axis runs. With PED on, a finished move becomes a clean anchor
+// only after the drive reports arrival (else home is cleared), a drive that
+// drops PED at rest has its element's home cleared, and motion is refused
+// `drive_not_ready` while PED is off at rest. With ALM on, an alarm cuts
+// pulses on every axis, clears home on every bound element if it persists,
+// and motion is refused `drive_alarm` while it is active.
+bool set_feedback(FeedbackConfig f, Refusal &err);
+
 // ── Network verbs ───────────────────────────────────────────────────────
 
 bool set_side(Side s, Refusal &err);       // Balanced L only; refused under RF
@@ -111,6 +123,13 @@ bool move_c(int32_t value, bool is_delta, Refusal &err);
 // ── Lookups ─────────────────────────────────────────────────────────────
 const Topology   &topology();
 const AxisConfig &axis_config(uint8_t axis);
+const FeedbackConfig &feedback();
+
+// True while any axis moves or a finished move still waits for its drive to
+// confirm arrival (PED supervision) — the position is not recorded yet.
+// Gates that need the tuner at rest (topology, drive feedback, firmware
+// update) use this rather than the HAL's busy().
+bool any_motion_pending();
 // Resolve "L" / "C1" / ... via the topology, or "0".."2" as an index. -1 if unknown.
 int resolve_axis(const char *name_or_index);
 

@@ -67,6 +67,10 @@ int to_json(const Persisted &p, char *out, size_t max) {
         e["pair"] = b.pair;
     }
 
+    JsonObject fb = doc["feedback"].to<JsonObject>();
+    fb["ped"] = p.feedback.ped;
+    fb["alm"] = p.feedback.alm;
+
     JsonArray axes = doc["axes"].to<JsonArray>();
     for (uint8_t a = 0; a < hal::kMaxAxes; a++) {
         const AxisConfig &c = p.axis[a];
@@ -116,6 +120,13 @@ bool from_json(const char *text, size_t len, Persisted &out) {
         p.topology.n++;
     }
     if (validate_topology(p.topology) != nullptr) return false;
+
+    // Absent in cards written before drive feedback existed → both off.
+    JsonObjectConst fb = doc["feedback"].as<JsonObjectConst>();
+    if (!fb.isNull()) {
+        p.feedback.ped = fb["ped"] | false;
+        p.feedback.alm = fb["alm"] | false;
+    }
 
     JsonArrayConst axes = doc["axes"].as<JsonArrayConst>();
     if (!axes.isNull()) {
@@ -178,6 +189,7 @@ void init(Persisted &cfg) {
             nvs_save_topology(cfg.topology);
             for (uint8_t a = 0; a < hal::kMaxAxes; a++) nvs_save_axis(a, cfg.axis[a]);
             nvs_save_generation(cfg.generation);
+            nvs_save_feedback(cfg.feedback);
         }
     }
     if (!from_card) cfg = ee;
@@ -197,6 +209,13 @@ void save_axis(uint8_t a, const AxisConfig &c) {
     if (a >= hal::kMaxAxes) return;
     mirror.axis[a] = c;
     nvs_save_axis(a, c);
+    bump_generation();
+    schedule();
+}
+
+void save_feedback(const FeedbackConfig &f) {
+    mirror.feedback = f;
+    nvs_save_feedback(f);
     bump_generation();
     schedule();
 }

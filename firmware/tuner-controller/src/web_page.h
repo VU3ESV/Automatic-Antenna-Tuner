@@ -111,6 +111,15 @@ button.estop.down:active{transform:translateY(0)}
   <div class="msg" id="msg-topo"></div>
 </div>
 
+<div class="panel" id="fbpanel">
+  <h2>Drive feedback (iHSS60 PED / ALM)</h2>
+  <div class="row kv">PED arrival supervision <b id="fbped">?</b> <button onclick="fbSet('ped',1)">Enable</button><button onclick="fbSet('ped',0)">Disable</button>
+    <span class="sep">·</span> ALM alarm supervision <b id="fbalm">?</b> <button onclick="fbSet('alm',1)">Enable</button><button onclick="fbSet('alm',0)">Disable</button></div>
+  <div class="row kv">live inputs: <span id="fblive">?</span></div>
+  <div class="row kv">Enable only once wired. PED+ → input Sig, PED− → Gnd: motor 0 (X) → pin 23, motor 1 (Y) → 28, motor 2 (Z) → 15. Every drive's ALM+ in parallel → pin 29 Sig, ALM− → Gnd. Drive factory settings (P14 = 1, P10 = 0). With PED on, a move is saved only after the drive confirms arrival, and a drive that loses PED clears that element's home. With ALM on, an alarm stops every motor and clears home on all elements.</div>
+  <div class="msg" id="msg-fb"></div>
+</div>
+
 <div class="panel" id="fwpanel">
   <h2>Firmware update over Ethernet</h2>
   <div class="row kv">running <b id="fwrun">?</b> <span class="sep">·</span> target <b id="fwt">?</b> <span class="sep">·</span> staged <b id="fws">?</b> <span id="fwi"></span></div>
@@ -157,6 +166,9 @@ async function fwUpload(){const f=document.getElementById('fwfile').files[0];if(
 function fwApply(){const o=last&&last.ota;if(!o||o.state!=='staged')return;
   if(!confirm('Apply the staged firmware ('+o.lines+' records, '+o.bytes+' bytes, crc32 '+o.crc32+') and reboot the controller?\nBypass must be engaged and nothing may be moving.'))return;
   cmd('/api/firmware_apply?lines='+o.lines,'fw');}
+function fbSet(k,on){const K=k.toUpperCase();
+  if(on&&!confirm('Enable '+K+' supervision?\nOnly once the '+K+' wiring is complete - '+(k==='ped'?'check every bound motor shows PED arrived at rest first, or every move will clear home.':'check the live ALM input reads clear first.')))return;
+  cmd('/api/feedback?'+k+'='+on,'fb');}
 function unhome(ax){if(confirm('Unset home on axis '+ax+'? Travel window INACTIVE and the axis is unanchored until you set home again.'))cmd('/api/unhome?axis='+ax,ax);}
 function drv(ax,on){if(!on&&!confirm('Disable the driver on axis '+ax+'? The element can then be turned by hand and the position counter will be wrong until you re-declare home.'))return;cmd('/api/enable?axis='+ax+'&on='+(on?1:0),ax);}
 function syncField(el,v){if(!el||document.activeElement===el)return;const live=String(v);
@@ -211,6 +223,11 @@ function render(s){
   document.getElementById('msg-fw').textContent=lastMsg['fw']||'';
   document.getElementById('msg-net').textContent=lastMsg['net']||'';
   document.getElementById('msg-topo').textContent=lastMsg['topo']||'';
+  const fb=s.feedback||{};
+  const fp=document.getElementById('fbped');fp.textContent=fb.ped?'ON':'off';fp.style.color=fb.ped?'#4f4':'#888';
+  const fa=document.getElementById('fbalm');fa.textContent=fb.alm?'ON':'off';fa.style.color=fb.alm?'#4f4':'#888';
+  document.getElementById('fblive').textContent=s.axes.map(a=>'motor '+a.axis+(a.name?' ('+a.name+')':'')+' PED '+(a.ped?'arrived':'off')).join(' · ')+' · ALM '+(fb.alarm?'ACTIVE':'clear');
+  document.getElementById('msg-fb').textContent=lastMsg['fb']||'';
   const tk=document.getElementById('tkind');if(document.activeElement!==tk&&tk.dataset.auto!==s.topology.kind){tk.value=s.topology.kind;tk.dataset.auto=s.topology.kind;renderTopoEditor();}
   if(!document.getElementById('tedit').childElementCount)renderTopoEditor();
   const root=document.getElementById('axes');
@@ -223,8 +240,8 @@ function render(s){
       const opts=KINDS.map(k=>`<option value="${k[0]}">${k[1]}</option>`).join('');
       const title=a.name?`<b>${a.name}</b> ${a.name==='L'?'— inductor pair':'— capacitor'} <span class="kv">motor ${a.axis} (${a.letter})</span>`:`spare motor ${a.axis} (${a.letter}) <span class="kv">not bound by the topology</span>`;
       d.innerHTML=`
-<h2><span class="beacon bcn"></span>${title}<span class="alarm alm">EMERGENCY STOP</span><span class="bdg dim unc">NO ELEMENT KIND — TRAVEL UNLIMITED</span><span class="bdg warn nohome">HOME NOT SET — UNANCHORED, SETUP MOVES IN BYPASS ONLY</span><span class="bdg run torun"></span><span class="bdg red limhit"></span><span class="bdg red dis">DRIVER DISABLED</span><span class="bdg red lsw">LIMIT SWITCH</span></h2>
-<div class="kv">pos <b class="pos">?</b> steps <span class="sep">·</span> turn <b class="trn">?</b> <span class="mxr"></span> <span class="sep">·</span> travel <b class="trv">?</b> <span class="sep">·</span> kind <b class="knd">?</b> <span class="sep">·</span> Speed <b class="spd">?</b> steps/s <span class="sep">·</span> Accel <b class="acc">?</b> steps/s²</div>
+<h2><span class="beacon bcn"></span>${title}<span class="alarm alm">EMERGENCY STOP</span><span class="bdg dim unc">NO ELEMENT KIND — TRAVEL UNLIMITED</span><span class="bdg warn nohome">HOME NOT SET — UNANCHORED, SETUP MOVES IN BYPASS ONLY</span><span class="bdg run torun"></span><span class="bdg red limhit"></span><span class="bdg red dis">DRIVER DISABLED</span><span class="bdg red dflt"></span><span class="bdg red lsw">LIMIT SWITCH</span></h2>
+<div class="kv">pos <b class="pos">?</b> steps <span class="sep">·</span> turn <b class="trn">?</b> <span class="mxr"></span> <span class="sep">·</span> travel <b class="trv">?</b> <span class="sep">·</span> kind <b class="knd">?</b> <span class="sep">·</span> Speed <b class="spd">?</b> steps/s <span class="sep">·</span> Accel <b class="acc">?</b> steps/s² <span class="sep">·</span> PED <b class="ped">?</b></div>
 <div class="pbar twin"><div class="tfill"></div></div>
 <div class="msg"></div>
 <div class="row">
@@ -263,6 +280,9 @@ function render(s){
     d.querySelector('.nohome').classList.toggle('on',!a.home_set);
     d.querySelector('.dis').classList.toggle('on',!a.enabled);
     d.querySelector('.lsw').classList.toggle('on',!!a.limit_sw);
+    const df=d.querySelector('.dflt'),DF={no_arrival:'DRIVE DID NOT ARRIVE',drive_lost:'DRIVE LOST (PED OFF)',alarm:'DRIVE ALARM'};
+    df.textContent=a.drive_fault?(DF[a.drive_fault]||a.drive_fault)+' — HOME CLEARED, RE-HOME':'';df.classList.toggle('on',!!a.drive_fault);
+    const pd=d.querySelector('.ped');pd.textContent=a.ped?'arrived':'off';pd.style.color=(s.feedback&&s.feedback.ped&&a.name)?(a.ped||a.moving?'#4f4':'#f44'):'#888';
     const atBound=(a.travel==='home'||a.travel==='max'||a.travel==='below_home'||a.travel==='above_max');
     const hit=d.querySelector('.limhit'),torun=d.querySelector('.torun');let showHit=false,showRun=false;
     if(lim&&a.last_clamp!=='none'){

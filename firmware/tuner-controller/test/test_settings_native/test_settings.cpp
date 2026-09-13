@@ -5,6 +5,8 @@
 
 #include <cstring>
 
+#include <ArduinoJson.h>
+
 #include "app/config.h"
 #include "app/settings.h"
 #include "hal/hal.h"
@@ -239,6 +241,30 @@ void test_saves_are_debounced_onto_the_card() {
     TEST_ASSERT_EQUAL_UINT32(4, app::settings::status().sd_saves);
 }
 
+void test_feedback_flags_in_json_default_off() {
+    app::Persisted p = sample();
+    p.feedback.ped = true;
+    const int n = app::settings::to_json(p, buf, sizeof(buf));
+    TEST_ASSERT_TRUE(n > 0);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"feedback\""));
+    app::Persisted q;
+    TEST_ASSERT_TRUE(app::settings::from_json(buf, static_cast<size_t>(n), q));
+    TEST_ASSERT_TRUE(q.feedback.ped);
+    TEST_ASSERT_FALSE(q.feedback.alm);
+
+    // A card written before the setting existed has no "feedback" key.
+    JsonDocument doc;
+    TEST_ASSERT_TRUE(deserializeJson(doc, buf, static_cast<size_t>(n)) == DeserializationError::Ok);
+    doc.remove("feedback");
+    static char old[2048];
+    const size_t m = serializeJson(doc, old, sizeof(old));
+    app::Persisted r;
+    r.feedback.ped = true;
+    TEST_ASSERT_TRUE(app::settings::from_json(old, m, r));
+    TEST_ASSERT_FALSE(r.feedback.ped);
+    TEST_ASSERT_FALSE(r.feedback.alm);
+}
+
 int main(int, char **) {
     UNITY_BEGIN();
     RUN_TEST(test_json_round_trip);
@@ -248,5 +274,6 @@ int main(int, char **) {
     RUN_TEST(test_empty_or_corrupt_card_gets_eeprom_copy);
     RUN_TEST(test_stale_card_loses_to_newer_eeprom);
     RUN_TEST(test_saves_are_debounced_onto_the_card);
+    RUN_TEST(test_feedback_flags_in_json_default_off);
     return UNITY_END();
 }

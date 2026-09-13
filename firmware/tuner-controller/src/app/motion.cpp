@@ -21,6 +21,19 @@ bool      dirty_written[hal::kMaxAxes] = {false, false, false};
 bool      estop_latched[hal::kMaxAxes] = {false, false, false};
 uint32_t  last_move_ms                 = 0;
 
+// Drive feedback supervision (iHSS60 PED / ALM). Inert unless cfg.feedback
+// enables it — see set_feedback() and docs/HW-T41-PINMAP.md §2.2.
+constexpr uint32_t kArrivalTimeoutMs = 2000;   // PED must confirm a finished move within this
+constexpr uint32_t kDriveLostMs      = 250;    // PED off this long at rest = drive lost
+constexpr uint32_t kAlarmConfirmMs   = 20;     // ALM held this long clears home (pulses stop at once)
+bool       awaiting_arrival[hal::kMaxAxes] = {false, false, false};
+uint32_t   train_end_ms[hal::kMaxAxes]     = {0, 0, 0};
+uint32_t   ped_off_since[hal::kMaxAxes]    = {0, 0, 0};
+bool       drive_ready[hal::kMaxAxes]      = {false, false, false};   // PED seen on at rest since boot / enable
+DriveFault drive_fault[hal::kMaxAxes]      = {DriveFault::None, DriveFault::None, DriveFault::None};
+uint32_t   alarm_since_ms                  = 0;
+bool       alarm_handled                   = false;
+
 bool refuse(Refusal &e, const char *code, const char *msg) {
     e.code = code;
     e.msg  = msg;
@@ -101,6 +114,106 @@ void mark_clean(uint8_t a) {
     dirty_written[a] = false;
 }
 
+// ── Drive feedback (iHSS60 PED / ALM) ───────────────────────────────────
+
+bool bound(uint8_t a) { return cfg.topology.axis_active(a); }
+
+// PED is supervised on an axis when enabled, the axis drives a topology
+// element (a spare channel has nothing wired), and its driver is enabled
+// (a driver switched off for setup drops PED by design).
+bool ped_supervised(uint8_t a) { return cfg.feedback.ped && bound(a) && hal::motor::enabled(a); }
+
+bool alarm_active() { return cfg.feedback.alm && hal::feedback::alarm(); }
+
+// The shaft can no longer be trusted to match the counter: clear home
+// (persisted — survives a reboot) and latch why for the operator. The first
+// cause is kept: an alarm also stops the drive arriving, and "alarm" is the
+// useful report, not the no-arrival timeout that follows it.
+void drop_anchor(uint8_t a, DriveFault why) {
+    if (drive_fault[a] == DriveFault::None) drive_fault[a] = why;
+    if (cfg.axis[a].home_set) {
+        cfg.axis[a].home_set = false;
+        settings::save_axis(a, cfg.axis[a]);
+    }
+}
+
+bool refuse_if_drive_fault(uint8_t a, Refusal &e) {
+    if (alarm_active()) {
+        refuse(e, "drive_alarm", "a drive reports an alarm (ALM) - check the drives' red LEDs; motion refused");
+        return true;
+    }
+    // Not while moving (PED is off by design) or while a finished move is
+    // still waiting for arrival (a quick follow-up click is fine).
+    if (ped_supervised(a) && !hal::motor::busy(a) && !awaiting_arrival[a] && !hal::feedback::arrived(a)) {
+        refuse(e, "drive_not_ready", "the drive does not report arrival (PED off) - motor power, cable or drive fault; motion refused");
+        return true;
+    }
+    return false;
+}
+
+// Once per tick, before the axes are read: the first alarm sample cuts
+// pulses everywhere (invariant 7 — no ramp); an alarm that persists means
+// shaft and counter disagree somewhere, and with the ALMs wired in parallel
+// we cannot tell where, so every bound element loses its home. A glitch
+// shorter than kAlarmConfirmMs only stops the moves.
+void supervise_alarm(uint32_t now_ms) {
+    if (!alarm_active()) { alarm_since_ms = 0; alarm_handled = false; return; }
+    if (alarm_since_ms == 0) {
+        alarm_since_ms = now_ms ? now_ms : 1;
+        for (uint8_t a = 0; a < hal::kMaxAxes; a++) hal::motor::stop(a);
+        return;
+    }
+    if (!alarm_handled && now_ms - alarm_since_ms >= kAlarmConfirmMs) {
+        alarm_handled = true;
+        for (uint8_t a = 0; a < hal::kMaxAxes; a++) {
+            if (bound(a)) drop_anchor(a, DriveFault::Alarm);
+        }
+    }
+}
+
+// Per axis, every tick, after the end of a pulse train has been noted.
+void supervise_ped(uint8_t a, bool busy, uint32_t now_ms) {
+    if (!ped_supervised(a)) {
+        if (awaiting_arrival[a]) {
+            // Supervision ended before the drive confirmed arrival (its driver
+            // was switched off): the position is unconfirmed, not an anchor.
+            // Feedback and topology changes, which could also end it, are
+            // refused until the wait resolves (any_busy()).
+            awaiting_arrival[a] = false;
+            if (!hal::feedback::arrived(a)) drop_anchor(a, DriveFault::NoArrival);
+            mark_clean(a);
+        }
+        ped_off_since[a] = 0;
+        drive_ready[a]   = false;
+        return;
+    }
+    if (busy) { ped_off_since[a] = 0; return; }              // PED normally drops while moving
+    const bool arrived = hal::feedback::arrived(a);
+    if (awaiting_arrival[a]) {
+        if (arrived) {
+            awaiting_arrival[a] = false;
+            drive_ready[a]      = true;
+            mark_clean(a);                                    // confirmed → clean anchor
+        } else if (now_ms - train_end_ms[a] >= kArrivalTimeoutMs) {
+            awaiting_arrival[a] = false;
+            drop_anchor(a, DriveFault::NoArrival);            // stall, alarm or no motor power
+            mark_clean(a);                                    // counter kept as the best estimate, not an anchor
+        }
+        return;
+    }
+    if (arrived) { drive_ready[a] = true; ped_off_since[a] = 0; return; }
+    // PED off at rest. Before the drive has reported ready (e.g. the
+    // controller booted with motor power off) this only refuses motion;
+    // once it has, the drive lost power or the shaft was forced.
+    if (!drive_ready[a]) return;
+    if (ped_off_since[a] == 0) { ped_off_since[a] = now_ms ? now_ms : 1; return; }
+    if (now_ms - ped_off_since[a] >= kDriveLostMs) {
+        drop_anchor(a, DriveFault::DriveLost);
+        drive_ready[a]   = false;
+        ped_off_since[a] = 0;
+    }
+}
+
 // Every bounded move funnels through here so the travel window and the
 // anchoring rule are enforced in exactly one place.
 MoveResult begin_move(uint8_t a, int32_t target, Refusal &e) {
@@ -109,6 +222,7 @@ MoveResult begin_move(uint8_t a, int32_t target, Refusal &e) {
         refuse(e, "estop", "emergency stop latched — release it before moving");
         return MoveResult::Refused;
     }
+    if (refuse_if_drive_fault(a, e)) return MoveResult::Refused;
     // Unanchored axis: motion only while the network is bypassed (setup —
     // jogging the element onto its home stop). Bounded moves only.
     if (!anchored(a) && !hal::relay::bypass()) {
@@ -136,8 +250,11 @@ MoveResult begin_move(uint8_t a, int32_t target, Refusal &e) {
     return hit ? MoveResult::Clamped : MoveResult::Started;
 }
 
+// Motion not finished: an axis running, or a finished move whose arrival the
+// drive has not confirmed yet (PED supervision) — its position is not
+// recorded, so nothing may change the rules that will record it.
 bool any_busy() {
-    for (uint8_t a = 0; a < hal::kMaxAxes; a++) if (hal::motor::busy(a)) return true;
+    for (uint8_t a = 0; a < hal::kMaxAxes; a++) if (hal::motor::busy(a) || awaiting_arrival[a]) return true;
     return false;
 }
 
@@ -161,13 +278,21 @@ void init() {
     hal::relay::init();
     hal::safety::init();
     hal::limits::init();
+    hal::feedback::init();
     hal::motor::init();
     hal::encoder::init();
 
     settings::init(cfg);   // EEPROM + SD card policy — app/settings.h
-    last_move_ms = 0;
+    last_move_ms   = 0;
+    alarm_since_ms = 0;
+    alarm_handled  = false;
     for (uint8_t a = 0; a < hal::kMaxAxes; a++) {
-        estop_latched[a] = false;
+        estop_latched[a]    = false;
+        awaiting_arrival[a] = false;
+        train_end_ms[a]     = 0;
+        ped_off_since[a]    = 0;
+        drive_ready[a]      = false;
+        drive_fault[a]      = DriveFault::None;
         AxisConfig &c = cfg.axis[a];
         hal::motor::set_speed(a, c.speed);
         hal::motor::set_accel(a, c.accel);
@@ -194,15 +319,24 @@ void init() {
 void tick(uint32_t now_ms, Snapshot &out) {
     hal::motor::tick();
     settings::tick(now_ms);
+    supervise_alarm(now_ms);   // may cut pulses on every axis before they are read below
 
     bool any_moving = false;
     bool all_estop  = true;
     for (uint8_t a = 0; a < hal::kMaxAxes; a++) {
         const bool busy = hal::motor::busy(a);
         if (prev_busy[a] && !busy) {
-            mark_clean(a);          // move complete → clean anchor
             last_move_ms = now_ms;
+            if (ped_supervised(a)) {
+                // Anchored only once the drive confirms the shaft got there.
+                awaiting_arrival[a] = true;
+                train_end_ms[a]     = now_ms;
+            } else {
+                mark_clean(a);          // move complete → clean anchor
+            }
         }
+        if (busy) awaiting_arrival[a] = false;   // superseded by a new pulse train
+        supervise_ped(a, busy, now_ms);
         prev_busy[a] = busy;
         any_moving  |= busy;
 
@@ -222,6 +356,8 @@ void tick(uint32_t now_ms, Snapshot &out) {
         s.travel     = travel_of(a);
         s.last_clamp = last_clamp[a];
         s.estop      = estop_latched[a];
+        s.ped        = hal::feedback::arrived(a);
+        s.drive_fault = drive_fault[a];
         all_estop   &= estop_latched[a];
         s.speed      = hal::motor::speed(a);
         s.accel      = hal::motor::accel(a);
@@ -241,6 +377,9 @@ void tick(uint32_t now_ms, Snapshot &out) {
     out.settings_source = settings::status().source;
     out.last_move_ms = last_move_ms;
     out.fwd_w        = hal::safety::fwd_w();
+    out.feedback_ped = cfg.feedback.ped;
+    out.feedback_alm = cfg.feedback.alm;
+    out.drive_alarm  = hal::feedback::alarm();
 }
 
 // ── Axis verbs ──────────────────────────────────────────────────────────
@@ -314,6 +453,8 @@ bool set_home(uint8_t a, Refusal &e) {
     c.home_set    = true;
     last_clamp[a] = 0;
     prev_busy[a]  = false;
+    awaiting_arrival[a] = false;
+    drive_fault[a]      = DriveFault::None;   // the operator has re-anchored the axis
     settings::save_axis(a, c);
     mark_clean(a);
     return true;
@@ -369,6 +510,19 @@ bool set_topology(Topology t, Refusal &e) {
     if (any_busy())            return refuse(e, "moving", "stop all axes before changing the topology");
     cfg.topology = t;
     settings::save_topology(t);
+    for (uint8_t a = 0; a < hal::kMaxAxes; a++) { drive_ready[a] = false; ped_off_since[a] = 0; }
+    return true;
+}
+
+bool set_feedback(FeedbackConfig f, Refusal &e) {
+    if (any_busy()) return refuse(e, "moving", "stop all axes (and let the drives confirm arrival) before changing drive feedback");
+    cfg.feedback = f;
+    // Re-learn readiness from the live PED level; a finished move still
+    // waiting for arrival is resolved by the next tick either way.
+    for (uint8_t a = 0; a < hal::kMaxAxes; a++) { drive_ready[a] = false; ped_off_since[a] = 0; }
+    alarm_since_ms = 0;
+    alarm_handled  = false;
+    settings::save_feedback(f);
     return true;
 }
 
@@ -401,6 +555,10 @@ bool home(Refusal &e) {
             return refuse(e, "not_anchored", "declare home on every element before homing");
         }
     }
+    // Check every drive before starting any of the moves.
+    for (uint8_t i = 0; i < cfg.topology.n; i++) {
+        if (refuse_if_drive_fault(cfg.topology.elements[i].axis, e)) return false;
+    }
     for (uint8_t i = 0; i < cfg.topology.n; i++) {
         Refusal ignored = {nullptr, nullptr};
         const MoveResult r = begin_move(cfg.topology.elements[i].axis, 0, ignored);
@@ -424,6 +582,8 @@ bool move_c(int32_t value, bool is_delta, Refusal &e) { return move_named("C", v
 
 const Topology   &topology()              { return cfg.topology; }
 const AxisConfig &axis_config(uint8_t a)  { return cfg.axis[a < hal::kMaxAxes ? a : 0]; }
+const FeedbackConfig &feedback()          { return cfg.feedback; }
+bool any_motion_pending()                 { return any_busy(); }
 
 int resolve_axis(const char *s) {
     if (!s || !*s) return -1;
