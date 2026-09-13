@@ -119,6 +119,24 @@ void FlexPwmStepper::moveTo(long target) {
     moveSteps(target - position());
 }
 
+bool FlexPwmStepper::retarget(long target) {
+    // Position and remaining count change together in the ISR, so reading
+    // one and writing the other under the same lock keeps the end point
+    // exact even if a reload IRQ is pending while we hold it: the ISR then
+    // counts that pulse against the new remaining count.
+    bool ok = false;
+    noInterrupts();
+    if (_running && _remaining > 0) {
+        const long ahead = (target - _position) * _direction;
+        if (ahead > 0) {
+            _remaining = ahead;
+            ok = true;
+        }
+    }
+    interrupts();
+    return ok;
+}
+
 void FlexPwmStepper::runContinuous(int dir) {
     const bool wasRunning = _running;
     stop();

@@ -65,6 +65,14 @@ public:
     // Kick off an absolute move to `target`.
     void moveTo(long target);
 
+    // Change the end point of a bounded move that is already running, on
+    // its current heading, without stopping the pulse train or touching
+    // DIR — the step rate is unaffected. Returns false (nothing changed)
+    // when no bounded move is running or `target` is not ahead of the
+    // current position in the direction of travel; callers then decelerate
+    // or start a fresh move.
+    bool retarget(long target);
+
     // Run an unbounded pulse train; dir = +1 (CW) or −1 (CCW).
     void runContinuous(int dir);
 

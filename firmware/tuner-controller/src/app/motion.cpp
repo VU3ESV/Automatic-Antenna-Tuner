@@ -118,7 +118,13 @@ MoveResult begin_move(uint8_t a, int32_t target, Refusal &e) {
     int hit = 0;
     const int32_t tgt = clamp_target(a, target, hit);
     last_clamp[a] = static_cast<int8_t>(hit);
-    if (tgt == hal::motor::position(a)) {
+    const bool moving = hal::motor::busy(a);
+    // Already heading exactly there (e.g. another "+N rev" clamped to the
+    // bound the axis is running to): leave the move alone.
+    if (moving && tgt == hal::motor::target(a)) return hit ? MoveResult::Clamped : MoveResult::Started;
+    // "Already there" only means something at rest. While moving, a target
+    // equal to the current position is a request to stop there.
+    if (!moving && tgt == hal::motor::position(a)) {
         if (hit) {
             refuse(e, "at_limit", hit > 0 ? "already at max limit" : "already at home limit");
             return MoveResult::AtLimit;
@@ -241,8 +247,15 @@ void tick(uint32_t now_ms, Snapshot &out) {
 
 MoveResult move_axis(uint8_t a, int32_t value, bool is_delta, Refusal &e) {
     if (refuse_if_bad_axis(a, e) || refuse_if_rf(e)) return MoveResult::Refused;
-    const int32_t target = is_delta ? hal::motor::position(a) + value : value;
-    return begin_move(a, target, e);
+    if (!is_delta) return begin_move(a, value, e);
+    // A relative move is taken from where the axis is already heading, so a
+    // second "+N rev" issued before the first finishes adds to it instead of
+    // replacing the rest of the first move with N revs from mid-travel.
+    const int64_t base   = hal::motor::busy(a) ? hal::motor::target(a) : hal::motor::position(a);
+    int64_t       target = base + value;
+    if (target > INT32_MAX) target = INT32_MAX;
+    if (target < INT32_MIN) target = INT32_MIN;
+    return begin_move(a, static_cast<int32_t>(target), e);
 }
 
 MoveResult run_to_end(uint8_t a, int dir, Refusal &e) {

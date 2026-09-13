@@ -17,6 +17,8 @@
 //   jog?axis&dir=cw|ccw&steps=N      bounded relative move (N=1 single step)
 //   goto?axis&steps=N                bounded absolute move
 //   rotate?axis&revs=N&dir=cw|ccw    ±N revolutions
+//                                    (jog / rotate add to where the axis is already
+//                                    heading: clicks made while it moves accumulate)
 //   run?axis&dir=cw|ccw|stop         run to the window end / stop
 //   stop[?axis]                      immediate stop (one axis / all), no latch
 //   estop[?axis]                     immediate stop + LATCHED alarm (one axis / all)

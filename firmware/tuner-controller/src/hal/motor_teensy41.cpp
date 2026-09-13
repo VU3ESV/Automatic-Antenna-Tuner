@@ -15,6 +15,14 @@
 // position is still exact because the ISR stops the train on the
 // counted step. stop() cuts pulses immediately (limit-trip path).
 //
+// Retargeting a running move (a second "+N rev" before the first ends, a
+// goto while moving): a target far enough ahead on the current heading
+// changes the pulse count on the fly — the train never stops, so the ramp
+// carries on at its current speed. A target behind it, or closer than the
+// stopping distance, first decelerates to the nearest stop point (never
+// past the old target), then runs to the new one. busy() and target() cover that hand-over so the app never sees the
+// axis idle — or records a clean anchor — halfway through a reversal.
+//
 // Drivers (iHSS60) are enabled at init and stay enabled — invariant 3:
 // a direct-coupled vacuum capacitor must never be free to back-drive.
 // set_enabled(false) is a deliberate operator action for setup only.
@@ -52,6 +60,8 @@ struct AxisDrv {
     bool           rampActive = false;
     float          rampSpeed  = 0.0f;
     uint32_t       rampLastUs = 0;
+    bool           pending    = false;   // reversal: decelerating, then run to pendingTarget
+    int32_t        pendingTarget = 0;
 
     AxisDrv(const board::axis_pins_t &p, IMXRT_FLEXPWM_t *pwm, uint8_t sm, IRQ_NUMBER_t irq)
         : stepper(p.step, p.dir, pwm, sm, irq), pin_en(p.en) {}
@@ -74,12 +84,29 @@ void startRamp(AxisDrv &d, int32_t target) {
     d.stepper.moveTo(target);
 }
 
+// Steps needed to ramp from the current rate down to the ramp floor.
+int32_t stopDistance(const AxisDrv &d) {
+    const float vtarget = static_cast<float>(d.speed);
+    const float vmin    = (vtarget < kRampMinSpeed) ? vtarget : kRampMinSpeed;
+    const float v       = d.rampActive ? d.rampSpeed : vmin;
+    const float acc     = (d.accel > 1) ? static_cast<float>(d.accel) : 1.0f;
+    const float dist    = (v * v - vmin * vmin) / (2.0f * acc);
+    return dist > 0.0f ? static_cast<int32_t>(dist) : 0;
+}
+
 // Decel starts when the remaining distance equals the stopping distance
 // from the current rate (plus one tick of travel so a late tick errs
 // towards decelerating early, never late).
 void serviceRamp(AxisDrv &d) {
     if (!d.rampActive) return;
     if (!d.stepper.isRunning()) {
+        if (d.pending) {                     // reversal: stopped — now run to the new target
+            d.pending = false;
+            if (d.pendingTarget != static_cast<int32_t>(d.stepper.position())) {
+                startRamp(d, d.pendingTarget);
+                return;
+            }
+        }
         d.rampActive = false;
         d.stepper.setSpeed(d.speed);
         return;
@@ -125,14 +152,47 @@ void init() {
 void move_to(Axis a, int32_t target_steps) {
     AxisDrv &d = D(a);
     if (!d.enabled) return;
-    if (target_steps == d.stepper.position()) { d.stepper.stop(); d.rampActive = false; return; }
+    d.pending = false;
+    // Running: retarget without stopping the train. Re-read and retry if a
+    // pulse lands between the read and the lock (retarget() refuses a
+    // target that is no longer ahead); bounded, then fall through.
+    for (int attempt = 0; attempt < 8 && d.stepper.isRunning(); ++attempt) {
+        const int32_t pos  = static_cast<int32_t>(d.stepper.position());
+        const int32_t togo = static_cast<int32_t>(d.stepper.distanceToGo());
+        if (togo == 0) break;                                   // burst just ended
+        const int dir = togo > 0 ? +1 : -1;                     // current heading
+        const int64_t ahead = static_cast<int64_t>(target_steps - pos) * dir;
+        const int32_t stop_dist = stopDistance(d);
+        if (ahead > stop_dist) {
+            // Far enough ahead on this heading to stop on it: new end point at
+            // the current speed; serviceRamp() re-plans the deceleration.
+            if (d.stepper.retarget(target_steps)) { d.rampActive = true; return; }
+            continue;
+        }
+        // Behind, exactly here, or too close ahead to stop in time: decelerate
+        // to the nearest stop point on this heading — never past the old
+        // target — then come back. Ending the train at speed instead would be
+        // an instant stop (following-error alarm or lost steps).
+        int32_t stop_steps = stop_dist + 1;
+        if (stop_steps > togo * dir) stop_steps = togo * dir;
+        if (d.stepper.retarget(pos + dir * stop_steps)) {
+            d.pendingTarget = target_steps;
+            d.pending       = true;
+            d.rampActive    = true;
+            return;
+        }
+    }
+    // At rest (or the running burst ended while we looked): start from rest.
+    if (target_steps == static_cast<int32_t>(d.stepper.position())) { d.rampActive = false; return; }
     startRamp(d, target_steps);
 }
 
-void move_by(Axis a, int32_t delta_steps) { move_to(a, D(a).stepper.position() + delta_steps); }
+// Relative to where the axis is heading, like app::motion::move_axis().
+void move_by(Axis a, int32_t delta_steps) { move_to(a, target(a) + delta_steps); }
 
 void stop(Axis a) {
     AxisDrv &d = D(a);
+    d.pending = false;
     d.stepper.stop();
     d.rampActive = false;
     d.stepper.setSpeed(d.speed);
@@ -142,13 +202,15 @@ int32_t position(Axis a) { return static_cast<int32_t>(D(a).stepper.position());
 
 int32_t target(Axis a) {
     const AxisDrv &d = D(a);
+    if (d.pending) return d.pendingTarget;
     return static_cast<int32_t>(d.stepper.position() + d.stepper.distanceToGo());
 }
 
-bool busy(Axis a) { return D(a).stepper.isRunning(); }
+bool busy(Axis a) { return D(a).stepper.isRunning() || D(a).pending; }
 
 void set_position(Axis a, int32_t value) {
     AxisDrv &d = D(a);
+    d.pending = false;
     d.stepper.stop();
     d.rampActive = false;
     d.stepper.setPosition(value);

@@ -37,7 +37,7 @@ void init() {
 }
 
 void move_to(Axis a, int32_t target_steps) { if (axis(a).enabled) axis(a).tgt = target_steps; }
-void move_by(Axis a, int32_t delta_steps)  { move_to(a, axis(a).pos + delta_steps); }
+void move_by(Axis a, int32_t delta_steps)  { move_to(a, axis(a).tgt + delta_steps); }   // from the pending target
 void stop(Axis a)                          { axis(a).tgt = axis(a).pos; }
 
 int32_t position(Axis a) { return axis(a).pos; }
