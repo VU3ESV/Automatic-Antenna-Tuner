@@ -124,6 +124,12 @@ bool move_c(int32_t value, bool is_delta, Refusal &err);
 const Topology   &topology();
 const AxisConfig &axis_config(uint8_t axis);
 const FeedbackConfig &feedback();
+
+// True while any axis moves or a finished move still waits for its drive to
+// confirm arrival (PED supervision) — the position is not recorded yet.
+// Gates that need the tuner at rest (topology, drive feedback, firmware
+// update) use this rather than the HAL's busy().
+bool any_motion_pending();
 // Resolve "L" / "C1" / ... via the topology, or "0".."2" as an index. -1 if unknown.
 int resolve_axis(const char *name_or_index);
 

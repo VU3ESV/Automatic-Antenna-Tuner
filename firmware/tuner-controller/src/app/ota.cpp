@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "app/motion.h"
 #include "app/settings.h"
 #include "hal/hal.h"
 
@@ -36,12 +37,10 @@ void reset_parser() {
     image_size = 0;
 }
 
-bool any_axis_busy() {
-    for (uint8_t a = 0; a < hal::kMaxAxes; a++) {
-        if (hal::motor::busy(a)) return true;
-    }
-    return false;
-}
+// Motion not finished: an axis running, or (with PED supervision) a move
+// whose arrival the drive has not confirmed — a reboot then would leave the
+// move marked in flight and clear home at the next boot.
+bool any_axis_busy() { return app::motion::any_motion_pending(); }
 
 // Transfer failure: the partial stage is erased (the handler holds the
 // loop and begin() excluded motion, so the erase cannot starve a move).

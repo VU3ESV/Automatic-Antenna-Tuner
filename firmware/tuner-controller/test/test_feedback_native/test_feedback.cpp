@@ -298,6 +298,28 @@ void test_first_fault_cause_is_kept() {
     TEST_ASSERT_TRUE(s.axes[0].drive_fault == DriveFault::Alarm);
 }
 
+void test_supervision_ending_mid_wait_does_not_confirm_a_stall() {
+    anchored_pi(fb(true, false));
+    TEST_ASSERT_TRUE(app::motion::accepted(app::motion::move_axis(1, 6400, true, err)));
+    run(10);
+    hal::feedback::sim_set_stalled(1, true);
+    settle();
+    // The pulses are done but the move is not recorded yet: settings that
+    // would end supervision wait for the arrival decision.
+    TEST_ASSERT_TRUE(app::motion::any_motion_pending());
+    TEST_ASSERT_FALSE(app::motion::set_feedback(fb(false, false), err));
+    TEST_ASSERT_EQUAL_STRING("moving", err.code);
+    TEST_ASSERT_FALSE(app::motion::set_topology(app::Topology::default_balanced_l(), err));
+    TEST_ASSERT_EQUAL_STRING("moving", err.code);
+    // Switching the driver off mid-wait ends supervision without arrival:
+    // the stalled counter must not become a clean anchor.
+    TEST_ASSERT_TRUE(app::motion::set_enabled(1, false, err));
+    run(1);
+    TEST_ASSERT_FALSE(app::motion::any_motion_pending());
+    TEST_ASSERT_FALSE(s.axes[1].anchored);
+    TEST_ASSERT_TRUE(s.axes[1].drive_fault == DriveFault::NoArrival);
+}
+
 int main(int, char **) {
     UNITY_BEGIN();
     RUN_TEST(test_off_by_default_levels_reported_but_ignored);
@@ -312,5 +334,6 @@ int main(int, char **) {
     RUN_TEST(test_alarm_stops_every_axis_and_clears_home);
     RUN_TEST(test_alarm_glitch_stops_but_keeps_home);
     RUN_TEST(test_first_fault_cause_is_kept);
+    RUN_TEST(test_supervision_ending_mid_wait_does_not_confirm_a_stall);
     return UNITY_END();
 }

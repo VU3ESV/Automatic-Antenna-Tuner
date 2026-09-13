@@ -174,7 +174,15 @@ void supervise_alarm(uint32_t now_ms) {
 // Per axis, every tick, after the end of a pulse train has been noted.
 void supervise_ped(uint8_t a, bool busy, uint32_t now_ms) {
     if (!ped_supervised(a)) {
-        if (awaiting_arrival[a]) { awaiting_arrival[a] = false; mark_clean(a); }   // supervision switched off mid-wait
+        if (awaiting_arrival[a]) {
+            // Supervision ended before the drive confirmed arrival (its driver
+            // was switched off): the position is unconfirmed, not an anchor.
+            // Feedback and topology changes, which could also end it, are
+            // refused until the wait resolves (any_busy()).
+            awaiting_arrival[a] = false;
+            if (!hal::feedback::arrived(a)) drop_anchor(a, DriveFault::NoArrival);
+            mark_clean(a);
+        }
         ped_off_since[a] = 0;
         drive_ready[a]   = false;
         return;
@@ -242,8 +250,11 @@ MoveResult begin_move(uint8_t a, int32_t target, Refusal &e) {
     return hit ? MoveResult::Clamped : MoveResult::Started;
 }
 
+// Motion not finished: an axis running, or a finished move whose arrival the
+// drive has not confirmed yet (PED supervision) — its position is not
+// recorded, so nothing may change the rules that will record it.
 bool any_busy() {
-    for (uint8_t a = 0; a < hal::kMaxAxes; a++) if (hal::motor::busy(a)) return true;
+    for (uint8_t a = 0; a < hal::kMaxAxes; a++) if (hal::motor::busy(a) || awaiting_arrival[a]) return true;
     return false;
 }
 
@@ -504,7 +515,7 @@ bool set_topology(Topology t, Refusal &e) {
 }
 
 bool set_feedback(FeedbackConfig f, Refusal &e) {
-    if (any_busy()) return refuse(e, "moving", "stop all axes before changing drive feedback");
+    if (any_busy()) return refuse(e, "moving", "stop all axes (and let the drives confirm arrival) before changing drive feedback");
     cfg.feedback = f;
     // Re-learn readiness from the live PED level; a finished move still
     // waiting for arrival is resolved by the next tick either way.
@@ -572,6 +583,7 @@ bool move_c(int32_t value, bool is_delta, Refusal &e) { return move_named("C", v
 const Topology   &topology()              { return cfg.topology; }
 const AxisConfig &axis_config(uint8_t a)  { return cfg.axis[a < hal::kMaxAxes ? a : 0]; }
 const FeedbackConfig &feedback()          { return cfg.feedback; }
+bool any_motion_pending()                 { return any_busy(); }
 
 int resolve_axis(const char *s) {
     if (!s || !*s) return -1;

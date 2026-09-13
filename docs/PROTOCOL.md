@@ -85,7 +85,8 @@ ALM (alarm) of every drive in parallel; wiring and pins in
 /api/feedback?ped=0|1&alm=0|1` (either parameter) enables or disables
 each signal once its wiring is done; persisted in EEPROM and in
 `config.json` (`"feedback": {"ped", "alm"}`), refused `moving` while an
-axis runs. `/api/status` reports `feedback` (`ped`, `alm` — enabled;
+axis runs or a finished move still awaits PED confirmation (the same
+gate applies to `set_topology` and to firmware upload / apply). `/api/status` reports `feedback` (`ped`, `alm` — enabled;
 `alarm` — live ALM level) and per axis `ped` (live level, also while
 disabled, for checking the wiring) and `drive_fault` (`""`, `no_arrival`,
 `drive_lost`, `alarm`). With PED on: a finished move is saved as a clean
