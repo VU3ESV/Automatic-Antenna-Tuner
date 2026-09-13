@@ -56,10 +56,14 @@ namespace motor {
     // coupled vacuum capacitor must never be free to back-drive).
     void     init();
 
-    // Drive towards an absolute target / a relative delta. Each call
-    // replaces any in-flight target on that axis. Real backends run a
-    // trapezoidal ramp from the axis' accel setting up to its speed
-    // setting; the end position is exact (ISR-counted).
+    // Drive towards an absolute target / a delta from the pending target.
+    // Each call replaces any in-flight target on that axis. Real backends
+    // run a trapezoidal ramp from the axis' accel setting up to its speed
+    // setting; the end position is exact (ISR-counted). Retargeting a
+    // running move never jerks the shaft: a target ahead on the current
+    // heading extends or shortens the move at the current speed; one behind
+    // it first decelerates to a stop, then runs to it. busy() stays true
+    // and target() reports the final target throughout.
     void     move_to(Axis a, int32_t target_steps);
     void     move_by(Axis a, int32_t delta_steps);
 
@@ -72,7 +76,7 @@ namespace motor {
     int32_t  position(Axis a);
     int32_t  target(Axis a);
 
-    // True while a pulse train is being emitted on the axis.
+    // True while the axis is moving, including the hand-over of a reversal.
     bool     busy(Axis a);
 
     // Anchor the step counter to a known value (after the operator

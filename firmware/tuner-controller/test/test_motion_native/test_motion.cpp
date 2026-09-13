@@ -92,6 +92,61 @@ void test_move_to_absolute_target() {
     TEST_ASSERT_EQUAL_INT32(2000, s.axes[1].steps);
 }
 
+// ── Retargeting a move in flight ────────────────────────────────────────
+
+// Run the sim for a few loop iterations without letting a move finish.
+void advance(int ticks) {
+    static uint32_t t = 1000000;
+    for (int i = 0; i < ticks; ++i) app::motion::tick(++t, s);
+}
+
+void test_relative_moves_accumulate_while_moving() {
+    const int32_t five_rev = 5 * app::kStepsPerRev;
+    TEST_ASSERT_TRUE(app::motion::accepted(app::motion::move_axis(0, five_rev, true, err)));
+    advance(100);                                    // part-way into the first 5 rev
+    TEST_ASSERT_TRUE(s.moving);
+    TEST_ASSERT_TRUE(s.axes[0].steps > 0 && s.axes[0].steps < five_rev);
+    // The bench report: a second "+5 rev" before the first finishes must
+    // give 10 rev in total, not 5 rev counted from mid-travel.
+    TEST_ASSERT_TRUE(app::motion::accepted(app::motion::move_axis(0, five_rev, true, err)));
+    TEST_ASSERT_EQUAL_INT32(2 * five_rev, hal::motor::target(0));
+    settle();
+    TEST_ASSERT_EQUAL_INT32(2 * five_rev, s.axes[0].steps);
+    // A relative move back is taken from the pending target too.
+    TEST_ASSERT_TRUE(app::motion::accepted(app::motion::move_axis(0, five_rev, true, err)));
+    advance(100);
+    TEST_ASSERT_TRUE(app::motion::accepted(app::motion::move_axis(0, -2 * five_rev, true, err)));
+    TEST_ASSERT_EQUAL_INT32(five_rev, hal::motor::target(0));
+    settle();
+    TEST_ASSERT_EQUAL_INT32(five_rev, s.axes[0].steps);
+}
+
+void test_goto_current_position_while_moving_stops_there() {
+    TEST_ASSERT_TRUE(app::motion::accepted(app::motion::move_axis(0, 32000, false, err)));
+    advance(100);
+    const int32_t here = s.axes[0].steps;
+    TEST_ASSERT_TRUE(here > 0 && here < 32000);
+    // Was answered "already there" while the axis ran on to 32000.
+    TEST_ASSERT_TRUE(app::motion::accepted(app::motion::move_axis(0, here, false, err)));
+    settle();
+    TEST_ASSERT_EQUAL_INT32(here, s.axes[0].steps);
+}
+
+void test_extra_delta_into_the_bound_it_runs_to_leaves_move_alone() {
+    TEST_ASSERT_TRUE(app::motion::set_element(1, app::ElementKind::VacuumCap, 1.0f, err));
+    TEST_ASSERT_TRUE(app::motion::set_home(1, err));
+    TEST_ASSERT_TRUE(app::motion::move_axis(1, 10000, true, err) == MoveResult::Clamped);
+    advance(10);
+    TEST_ASSERT_TRUE(s.axes[1].moving);
+    // Already running to max: another "+N" is clamped to the same target —
+    // reported as clamped, not refused, and the move is not touched.
+    TEST_ASSERT_TRUE(app::motion::move_axis(1, 1000, true, err) == MoveResult::Clamped);
+    TEST_ASSERT_EQUAL_INT32(app::kStepsPerRev, hal::motor::target(1));
+    settle();
+    TEST_ASSERT_EQUAL_INT32(app::kStepsPerRev, s.axes[1].steps);
+    TEST_ASSERT_TRUE(s.axes[1].travel == app::Travel::Max);
+}
+
 void test_bad_axis_refused() {
     TEST_ASSERT_TRUE(app::motion::move_axis(7, 10, true, err) == MoveResult::Refused);
     TEST_ASSERT_EQUAL_STRING("bad_axis", err.code);
@@ -420,6 +475,9 @@ int main(int, char **) {
     RUN_TEST(test_setup_move_allowed_in_bypass_when_unanchored);
     RUN_TEST(test_unanchored_move_refused_when_engaged);
     RUN_TEST(test_move_to_absolute_target);
+    RUN_TEST(test_relative_moves_accumulate_while_moving);
+    RUN_TEST(test_goto_current_position_while_moving_stops_there);
+    RUN_TEST(test_extra_delta_into_the_bound_it_runs_to_leaves_move_alone);
     RUN_TEST(test_bad_axis_refused);
     RUN_TEST(test_window_clamps_and_latches_bound);
     RUN_TEST(test_window_inactive_until_home_declared);

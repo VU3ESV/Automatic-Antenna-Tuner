@@ -46,7 +46,11 @@ inline bool accepted(MoveResult r) { return r == MoveResult::Started || r == Mov
 // ── Axis-addressed verbs (axis = carrier channel 0..kMaxAxes-1) ─────────
 
 // Bounded move: relative (`is_delta`) or absolute. ±1 is the fine-tuning
-// single step. Clamped to the axis' travel window when active.
+// single step. Clamped to the axis' travel window when active. A relative
+// value is added to the axis' pending target while it moves, so repeated
+// deltas accumulate (two "+5 rev" = 10 rev); an absolute target, or a
+// relative one that points back, retargets the move — the HAL decelerates
+// before reversing.
 MoveResult move_axis(uint8_t axis, int32_t value, bool is_delta, Refusal &err);
 
 // "Continuous" run in `dir` (+1 / -1). On an axis with an active window
