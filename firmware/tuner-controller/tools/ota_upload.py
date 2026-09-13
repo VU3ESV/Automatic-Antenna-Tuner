@@ -8,8 +8,9 @@ with the one computed here from the same file, asks it to apply
 confirmation FlasherX asks for on a serial console) and waits for the
 controller to come back, reporting the build stamp it now runs.
 
-    ota_upload.py --host 192.168.86.44 .pio/build/teensy41_native/firmware.hex
-    ota_upload.py --host 192.168.86.44 --stage-only firmware.hex   # stage, do not apply
+    ota_upload.py --host tuner-controller.local .pio/build/teensy41_native/firmware.hex
+    ota_upload.py --host tuner-controller.local --stage-only firmware.hex   # stage, do not apply
+    ota_upload.py --host 192.168.86.28 firmware.hex   # by address if .local does not resolve
 
 Used by the *_ota PlatformIO environments as upload_command. Standard
 library only. Exit status is non-zero on any failure so `pio run -t upload`
@@ -122,7 +123,7 @@ def describe(st):
 def main():
     ap = argparse.ArgumentParser(description="Flash the tuner-controller over Ethernet")
     ap.add_argument("hexfile")
-    ap.add_argument("--host", required=True, help="controller IP or name")
+    ap.add_argument("--host", required=True, help="controller hostname (tuner-controller.local) or IP")
     ap.add_argument("--port", type=int, default=80)
     ap.add_argument("--stage-only", action="store_true", help="upload and verify, do not apply")
     ap.add_argument("--wait", type=int, default=90, help="seconds to wait for the controller after apply")

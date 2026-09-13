@@ -153,9 +153,9 @@ void send_status(EthernetClient &c, const app::Snapshot &s, int master_clients) 
     const size_t cap = sizeof(json);
     const IPAddress ip = Ethernet.localIP();
     int n = put(json, cap, 0,
-        "{\"net\":{\"backend\":\"%s\",\"link\":\"%s\",\"ip\":\"%u.%u.%u.%u\",\"master_clients\":%d},"
+        "{\"net\":{\"backend\":\"%s\",\"link\":\"%s\",\"hostname\":\"%s\",\"ip\":\"%u.%u.%u.%u\",\"master_clients\":%d},"
         "\"topology\":{\"kind\":\"%s\",\"elements\":[",
-        net_hal::lib_name(), net_hal::link_state() ? "up" : "down",
+        net_hal::lib_name(), net_hal::link_state() ? "up" : "down", net_hal::hostname(),
         ip[0], ip[1], ip[2], ip[3], master_clients,
         app::topology_kind_name(s.topology.kind));
     for (uint8_t i = 0; i < s.topology.n; i++) {

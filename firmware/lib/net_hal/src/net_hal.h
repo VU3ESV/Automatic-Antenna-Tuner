@@ -37,13 +37,42 @@
     #error "Define TUNER_NET_QNETHERNET or TUNER_NET_NATIVEETHERNET via platformio.ini build_flags"
 #endif
 
+// Hostname the device announces on the LAN. Override per project with
+// build_flags = '-DTUNER_HOSTNAME="name"'. One DNS label: 1-63 characters
+// of a-z, 0-9 and '-', not starting or ending with '-'.
+#ifndef TUNER_HOSTNAME
+#define TUNER_HOSTNAME "tuner-controller"
+#endif
+
 namespace net_hal {
+
+constexpr const char *kHostname = TUNER_HOSTNAME;
 
 // Bring up Ethernet with DHCP. Returns true if begin() didn't fail
 // outright. On NativeEthernet, DHCP runs inside begin() and can block
 // for up to ~60 s by default — use wait_dhcp() afterwards for parity
 // with QNEthernet's asynchronous startup.
-bool begin();
+//
+// `hostname` (optional) is remembered for hostname() / start_mdns() and
+// sent to the DHCP server as the Host Name option (12), so routers that
+// register DHCP names list the device and serve reverse DNS for it — what
+// IP scanners display. QNEthernet does this natively. Stock FNET
+// (NativeEthernet) cannot; a project that applies
+// tuner-controller/tools/fnet_dhcp_hostname.py patches it in.
+// dhcp_sends_hostname() reports which.
+bool begin(const char *hostname = nullptr);
+
+// True when begin() also sends the hostname through DHCP.
+bool dhcp_sends_hostname();
+
+// Start the mDNS responder: answers <hostname>.local and advertises an
+// HTTP server on `http_port` as _http._tcp. Call once, after DHCP has
+// given the interface an address. Both backends. Returns false if the
+// responder or the service could not be registered.
+bool start_mdns(const char *hostname, uint16_t http_port);
+
+// The hostname given to begin() / start_mdns(); "" if none.
+const char *hostname();
 
 // Wait up to ms milliseconds for the PHY link. Returns true if link
 // came up. On QNEthernet this is Ethernet.waitForLink(ms); on
