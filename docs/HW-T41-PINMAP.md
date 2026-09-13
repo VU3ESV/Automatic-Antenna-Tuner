@@ -72,8 +72,8 @@ same `hal/motor_teensy41.cpp` interface.
 | 20   | X LIMIT      | X-axis mechanical home microswitch         |
 | 21   | Y LIMIT      | Y-axis mechanical home microswitch         |
 | 22   | Z LIMIT      | Z-axis mechanical home microswitch (T/Pi)  |
-| 23   | A LIMIT (M3) | Closed-loop driver **ALM, axis L (X)** — §2.2 (verify at final build). Was: spare fault input |
-| 28   | B LIMIT (M4) | Closed-loop driver **ALM, axis C (Y)** — §2.2 (verify at final build). Shared with AUXINPUT5 (MPG mode) |
+| 23   | A LIMIT (M3) | Closed-loop driver **PED, motor X (axis 0)** — §2.2 (firmware 2026-09-13, off until enabled). Was: spare fault input |
+| 28   | B LIMIT (M4) | Closed-loop driver **PED, motor Y (axis 1)** — §2.2 (firmware 2026-09-13, off until enabled). Shared with AUXINPUT5 (MPG mode) |
 
 ### 2.1 · Opto-input electrical design (all ten inputs)
 
@@ -126,17 +126,34 @@ tying ALM− to carrier ground creates no ground loop.
   transistor from the LED budget (two in series comfortable, three
   marginal).
 
-**Pin plan:** ALM L-axis → 23 (Lim A), ALM C-axis → 28 (Lim B); PED for
-the most stall-prone axis → 15 (Probe), displacing the RF-presence
-spare. A 3-axis T/Pi build with per-axis ALM *and* PED runs out of opto
-inputs → wire-OR the ALMs. If this lands, the "motor-fault aggregate"
-role on pin 36 (§4) moves here.
+**Pin plan (implemented 2026-09-13, `hal/board/t41_v209.h`):** PED of
+motor X (axis 0) → 23 (Lim A), motor Y (axis 1) → 28 (Lim B), motor Z
+(axis 2) → 15 (Probe, displacing the RF-presence spare); **every drive's
+ALM in parallel → 29** (Safety Door, displacing the enclosure
+interlock). Parallel is right for the drive default P10 = 0 (any faulted
+drive pulls the input low); if P10 is ever set to 1 with the HISU tool,
+rewire the ALMs in series and flip `ALM_ACTIVE_LOW`. The "motor-fault
+aggregate" role on pin 36 (§4) is superseded.
 
-**Firmware behaviour (to implement with the wiring):** read ALM like a
-limit input; on fault stop pulses, mark the axis `homed:false` (a
-following-error trip means shaft and counter disagree), surface in
-`state`/UI. After a bounded move's pulse train ends, wait for PED before
-persisting position; treat a PED timeout as a stall.
+**Why PED matters more than ALM without the HISU tool.** Both outputs
+are opto transistors lit by the drive's own electronics, so an unpowered
+drive leaves them open. With P14 = 1 (default) that reads "not arrived"
+— a loss of motor power is visible. With P10 = 0 (default) it reads "no
+alarm" — ALM alone is blind to it (iHSS60 manual V1.1 §3.1, §10). The
+manual lists no under-voltage alarm code, and the drive is rated
+24–50 VDC.
+
+**Firmware behaviour (implemented 2026-09-13, `hal::feedback` +
+`app::motion`; off by default, enabled per signal with
+`/api/feedback?ped=1&alm=1` once wired, persisted):** PED — a finished
+move is saved as a clean anchor only after arrival within 2 s, else home
+is cleared (`no_arrival`); PED off 250 ms at rest after the drive was
+ready clears home (`drive_lost`); PED off at rest refuses motion
+(`drive_not_ready`). ALM — the first sample cuts pulses on every axis;
+held 20 ms it clears home on every bound element (`alarm`); motion is
+refused (`drive_alarm`) while active. Live levels show on the browser
+page even while disabled, to check the wiring before enabling. Details:
+docs/PROTOCOL.md "Drive feedback".
 
 **Drive timing facts the HAL must honour (iHSS60 manual §5.5):** DIR
 stable ≥ 6 µs before the first PUL edge; DIR unchanged ≥ 5 µs after the
@@ -171,10 +188,10 @@ reuses them for its own operational signals.
 | Pin  | grblHAL function | Board net  | Tuner use                                         |
 | ---- | ---------------- | ---------- | ------------------------------------------------- |
 | 14   | RESET            | RESET      | Operator panic — drive everything to BYPASS + halt |
-| 15   | PROBE            | PROBE      | Closed-loop driver **PED** (in-position) for the most stall-prone axis — §2.2 (verify at final build). Displaces the RF-presence spare |
+| 15   | PROBE            | PROBE      | Closed-loop driver **PED, motor Z (axis 2)** — §2.2 (firmware 2026-09-13). Displaces the RF-presence spare |
 | 16   | FEED_HOLD        | FEED HOLD  | **TX-key panic** — hardware lockout while PTT'd    |
 | 17   | CYCLE_START      | CYCLE START | Engage-from-bypass momentary input                |
-| 29   | SAFETY_DOOR      | SAFETY DOOR | Enclosure interlock — refuse motion if open       |
+| 29   | SAFETY_DOOR      | SAFETY DOOR | Closed-loop driver **ALM, every drive in parallel** — §2.2 (firmware 2026-09-13). Displaces the enclosure interlock |
 
 ## 4 · Auxiliary digital inputs (5× EMI-filtered, Schmitt-trigger)
 
@@ -330,9 +347,9 @@ The pins our firmware actually drives, in topology order:
 | K2 (Lo-Z)         | 11         | SPINDLE DIR   |
 | K3 (Bypass)       | 19         | COOLANT FLOOD |
 | TX-key panic      | 16         | FEED HOLD     |
-| Driver ALM, L axis *(§2.2, verify at final build)* | 23 | A LIMIT |
-| Driver ALM, C axis *(§2.2, verify at final build)* | 28 | B LIMIT |
-| Driver PED, one axis *(§2.2, verify at final build)* | 15 | PROBE   |
+| Driver PED, motor X *(§2.2)* | 23 | A LIMIT |
+| Driver PED, motor Y *(§2.2)* | 28 | B LIMIT |
+| Driver ALM, all drives in parallel *(§2.2)* | 29 | SAFETY DOOR |
 
 ### T-Match / Pi-Match (3 stepper axes)
 
@@ -344,6 +361,7 @@ Adds a third stepper on the Z axis:
 | 3rd-element DIR  | 7        | Z DIR       |
 | 3rd-element EN   | 39       | Z ENABLE    |
 | 3rd-axis end-stop | 22      | Z LIMIT     |
+| 3rd-axis driver PED *(§2.2)* | 15 | PROBE |
 
 K1 / K2 are L-Match-only (the selector relay is unused in symmetric
 T/Pi topologies). K3 (bypass) is retained per

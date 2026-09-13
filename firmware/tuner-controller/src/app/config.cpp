@@ -134,6 +134,10 @@ const char *validate_topology(Topology &t) {
 //
 //   0..3    u32  magic 'ATC1'
 //   4       u8   layout version (2)
+//   5       u8   drive feedback (2026-09-13): 0xA0 | bit 0 PED | bit 1 ALM.
+//                Any other value — erased 0xFF left by older firmware —
+//                means both off, so the byte needed no layout version
+//                bump and older builds simply ignore it.
 //   8       u8   topology kind
 //   9       u8   topology element count
 //   12..15  u32  settings generation (see Persisted::generation)
@@ -153,10 +157,15 @@ const char *validate_topology(Topology &t) {
 namespace {
 
 constexpr uint32_t kMagic    = 0x41544331UL;   // 'ATC1'
-constexpr uint8_t  kVersion  = 2;              // v2: + generation counter
+constexpr uint8_t  kVersion      = 2;          // v2: + generation counter
+constexpr uint8_t  kFbMarker     = 0xA0;       // drive feedback byte = kFbMarker | flags
+constexpr uint8_t  kFbMarkerMask = 0xF0;
+constexpr uint8_t  kFbPed        = 0x01;
+constexpr uint8_t  kFbAlm        = 0x02;
 
 constexpr size_t OFF_MAGIC      = 0;
 constexpr size_t OFF_VERSION    = 4;
+constexpr size_t OFF_FEEDBACK   = 5;
 constexpr size_t OFF_TOPO_KIND  = 8;
 constexpr size_t OFF_TOPO_N     = 9;
 constexpr size_t OFF_GENERATION = 12;
@@ -209,8 +218,13 @@ void nvs_save_generation(uint32_t generation) {
     wr<uint32_t>(OFF_GENERATION, generation);
 }
 
+void nvs_save_feedback(const FeedbackConfig &f) {
+    wr<uint8_t>(OFF_FEEDBACK, static_cast<uint8_t>(kFbMarker | (f.ped ? kFbPed : 0) | (f.alm ? kFbAlm : 0)));
+}
+
 void nvs_format(const Persisted &p) {
     nvs_save_generation(p.generation);
+    nvs_save_feedback(p.feedback);
     nvs_save_topology(p.topology);
     for (uint8_t a = 0; a < hal::kMaxAxes; a++) {
         nvs_save_axis(a, p.axis[a]);
@@ -274,6 +288,16 @@ bool nvs_load(Persisted &out) {
         if (c.accel < 1 || c.accel > kMaxAccelHz2) c.accel = kDefaultAccel;
         out.dirty[a] = dirty != 0;
     }
+
+    // The feedback byte carries its own marker: a record from firmware that
+    // predates it (byte never written, erased flash 0xFF) loads unchanged
+    // with supervision off, and flashing an older build never invalidates
+    // the record — nor, with it, the position anchors (invariant 3).
+    uint8_t flags = 0;
+    rd(OFF_FEEDBACK, flags);
+    const bool marked = (flags & kFbMarkerMask) == kFbMarker;
+    out.feedback.ped  = marked && (flags & kFbPed) != 0;
+    out.feedback.alm  = marked && (flags & kFbAlm) != 0;
     return true;
 }
 

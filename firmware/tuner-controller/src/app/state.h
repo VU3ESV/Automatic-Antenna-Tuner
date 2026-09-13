@@ -25,6 +25,16 @@ enum class Travel : uint8_t {
 };
 const char *travel_name(Travel t);
 
+// Why drive feedback supervision cleared an axis' home (app::motion,
+// feedback enabled). Latched until home is declared again.
+enum class DriveFault : uint8_t {
+    None,
+    NoArrival,   // PED did not confirm a finished move — stall, alarm or no motor power
+    DriveLost,   // PED dropped at rest — motor power lost or shaft forced
+    Alarm,       // ALM active
+};
+const char *drive_fault_name(DriveFault f);   // "", "no_arrival", "drive_lost", "alarm"
+
 struct AxisSnapshot {
     int32_t     steps      = 0;
     int32_t     enc        = 0;
@@ -40,6 +50,8 @@ struct AxisSnapshot {
     Travel      travel     = Travel::Unlimited;
     int8_t      last_clamp = 0;       // -1 home / +1 max bound trimmed the last verb
     bool        estop      = false;   // emergency-stop alarm latched on this axis
+    bool        ped        = false;   // live iHSS60 PED input (arrived) — reported even when not supervised
+    DriveFault  drive_fault = DriveFault::None;   // why drive feedback cleared home
     uint32_t    speed      = kDefaultSpeed;
     uint32_t    accel      = kDefaultAccel;
 };
@@ -56,6 +68,9 @@ struct Snapshot {
     bool     homed        = false;   // every topology-bound axis anchored
     bool     rf_lockout   = false;
     bool     estop_all    = false;   // every axis has its E-stop alarm latched (E-STOP ALL pressed)
+    bool     feedback_ped = false;   // PED supervision enabled (app::FeedbackConfig)
+    bool     feedback_alm = false;   // ALM supervision enabled
+    bool     drive_alarm  = false;   // live ALM input level
     bool     sd_present   = false;   // microSD card mounted
     bool     sd_ok        = false;   // /tuner/config.json read or written successfully
     SettingsSource settings_source = SettingsSource::Defaults;

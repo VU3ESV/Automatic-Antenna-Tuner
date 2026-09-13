@@ -10,7 +10,7 @@
 //             without a card still has the full configuration.
 //   SD card — human-readable `/tuner/config.json`: topology + element→
 //             motor map, per-axis element kind, rated travel, speed,
-//             accel, home flag, plus the last saved positions for
+//             accel, home flag, drive feedback flags, plus the last saved positions for
 //             information. Wins over EEPROM for *settings* at boot when
 //             present and valid (so a card can carry a configuration
 //             between boards or be edited on a PC), and is rewritten
@@ -43,6 +43,7 @@ void init(Persisted &cfg);
 // Persist one change: EEPROM immediately, card copy scheduled.
 void save_topology(const Topology &t);
 void save_axis(uint8_t axis, const AxisConfig &c);
+void save_feedback(const FeedbackConfig &f);
 void save_position(uint8_t axis, int32_t pos, bool dirty);
 
 // Flush a scheduled card write once the debounce has elapsed; also

@@ -162,6 +162,13 @@ End-to-end: Teensy → master → browser shows real controller state.
 
 #### M1b.2 — Hardware integration (motion / measurement / safety)
 
+- [x] **Drive feedback supervision (2026-09-13).** iHSS60 PED per motor
+      (pins 23 / 28 / 15) and ALM of all drives in parallel (pin 29): a
+      move is anchored only after PED confirms arrival, a stalled or
+      unpowered drive clears that element's home, an alarm stops every
+      motor. Off by default until wired; enabled per signal from the
+      browser page, persisted in EEPROM and on the card. Bench wiring and
+      a 24 V motor supply still to do.
 - [x] **Firmware update over Ethernet (2026-09-06).** `POST /api/firmware`
       streams PlatformIO's hex into the controller, which stages it in
       free flash (FlasherX flash layer, `hal::firmware`), reports record

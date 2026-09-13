@@ -28,7 +28,7 @@ namespace {
                a.element != b.element || a.kind != b.kind ||
                a.home_set != b.home_set || a.anchored != b.anchored ||
                a.max_steps != b.max_steps || a.travel != b.travel ||
-               a.last_clamp != b.last_clamp || a.estop != b.estop || a.speed != b.speed ||
+               a.last_clamp != b.last_clamp || a.estop != b.estop || a.drive_fault != b.drive_fault || a.speed != b.speed ||
                a.accel != b.accel || std::fabs(a.max_rev - b.max_rev) > 1e-6f;
     }
 }
@@ -46,6 +46,16 @@ const char *travel_name(Travel t) {
     return "?";
 }
 
+const char *drive_fault_name(DriveFault f) {
+    switch (f) {
+    case DriveFault::None:      return "";
+    case DriveFault::NoArrival: return "no_arrival";
+    case DriveFault::DriveLost: return "drive_lost";
+    case DriveFault::Alarm:     return "alarm";
+    }
+    return "?";
+}
+
 bool Snapshot::differs(const Snapshot &o) const {
     if (topology_differs(topology, o.topology)) return true;
     for (uint8_t a = 0; a < hal::kMaxAxes; a++) {
@@ -57,6 +67,7 @@ bool Snapshot::differs(const Snapshot &o) const {
     if (homed        != o.homed)        return true;
     if (rf_lockout   != o.rf_lockout)   return true;
     if (estop_all    != o.estop_all)    return true;
+    if (feedback_ped != o.feedback_ped || feedback_alm != o.feedback_alm || drive_alarm != o.drive_alarm) return true;
     if (sd_present   != o.sd_present)   return true;
     if (sd_ok        != o.sd_ok)        return true;
     if (settings_source != o.settings_source) return true;

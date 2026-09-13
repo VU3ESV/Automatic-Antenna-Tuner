@@ -244,7 +244,12 @@ a Phase-2 deliverable (see [docs/PLAN.md](docs/PLAN.md)).
    [docs/HARDWARE.md](docs/HARDWARE.md) "Risks of the belt-driven
    lead-screw limit mechanism". See also
    [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §5.2.5 and
-   [docs/HW-T41-PINMAP.md](docs/HW-T41-PINMAP.md) §2.2.
+   [docs/HW-T41-PINMAP.md](docs/HW-T41-PINMAP.md) §2.2. The PED / ALM part
+   is implemented as opt-in supervision (2026-09-13): PED per motor must
+   confirm every move before it is anchored and flags a dead drive, ALM of
+   all drives in parallel stops motion — both off until the operator
+   enables them after wiring (`/api/feedback`, persisted), because an
+   unwired PED would clear every home.
 
 ## WebSocket protocol (summary; full spec in [docs/PROTOCOL.md](docs/PROTOCOL.md))
 
