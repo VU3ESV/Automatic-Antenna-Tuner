@@ -99,7 +99,8 @@ PED). With ALM on: an alarm cuts pulses on every axis at once and, held
 20 ms, clears home on every bound element (`alarm`); motion verbs are
 refused `drive_alarm` while it is active. A `drive_fault` stays until
 home is declared again on that axis. Both refusal codes apply to the
-master link's motion verbs too; the setting itself is HTTP-only for now.
+master link's motion verbs too; the setting itself is HTTP-only for now. Wiring, commissioning and
+recovery: [DRIVE-FEEDBACK.md](DRIVE-FEEDBACK.md).
 
 ## 1. Framing
 

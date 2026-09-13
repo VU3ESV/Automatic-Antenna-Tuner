@@ -31,6 +31,10 @@ verbs only.
 - **[docs/HARDWARE.md](docs/HARDWARE.md)** — BoM, schematics, wiring,
   calibration procedures. Short-form BoM today; long-form fills in
   M1b.2 → M5.
+- **[docs/DRIVE-FEEDBACK.md](docs/DRIVE-FEEDBACK.md)** — iHSS60 PED / ALM
+  drive feedback: why it exists, wiring to the V2.09 carrier,
+  commissioning, fault recovery, troubleshooting and limits. Off by
+  default until wired.
 - **[docs/PROTOCOL.md](docs/PROTOCOL.md)** — full WebSocket JSON protocol
   spec, frame by frame.
 - **[docs/TUNING.md](docs/TUNING.md)** — tuning-algorithm strategy:

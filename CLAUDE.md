@@ -36,6 +36,7 @@ Automatic-Antenna-Tuner/
 │   ├── ARCHITECTURE.md  # system + RF + software architecture
 │   ├── PLAN.md          # milestone-based implementation plan
 │   ├── HARDWARE.md      # BoM, schematic notes, wiring
+│   ├── DRIVE-FEEDBACK.md # iHSS60 PED / ALM supervision: wiring, commissioning, recovery
 │   ├── PROTOCOL.md      # full WebSocket JSON protocol spec
 │   ├── RF-DESIGN.md     # network-topology theory, component sizing, detector chain
 │   ├── HW-T41-CARRIER.md # plan: grblHAL-teensy 4.x V2.09 board as the carrier
@@ -248,7 +249,8 @@ a Phase-2 deliverable (see [docs/PLAN.md](docs/PLAN.md)).
    is implemented as opt-in supervision (2026-09-13): PED per motor must
    confirm every move before it is anchored and flags a dead drive, ALM of
    all drives in parallel stops motion — both off until the operator
-   enables them after wiring (`/api/feedback`, persisted), because an
+   enables them after wiring (`/api/feedback`, persisted;
+   [docs/DRIVE-FEEDBACK.md](docs/DRIVE-FEEDBACK.md)), because an
    unwired PED would clear every home.
 
 ## WebSocket protocol (summary; full spec in [docs/PROTOCOL.md](docs/PROTOCOL.md))

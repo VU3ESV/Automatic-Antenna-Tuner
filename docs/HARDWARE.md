@@ -322,7 +322,11 @@ limits (default 100 steps inside the switch) → per-axis lead-screw
 limit switches (both ends) on the V2.09 carrier opto inputs → PED
 confirmation
 before a move is recorded complete. Wiring and open final-build checks
-in [`HW-T41-PINMAP.md`](HW-T41-PINMAP.md) §2.2.
+in [`HW-T41-PINMAP.md`](HW-T41-PINMAP.md) §2.2. The ALM and PED layers
+are implemented as opt-in supervision (2026-09-13), off until the wiring
+is done. Without the HISU tool the drives stay at P10 = 0 / P14 = 1, so
+PED — not ALM — carries the motor-power-loss detection; operator guide
+in [`DRIVE-FEEDBACK.md`](DRIVE-FEEDBACK.md).
 Full enforcement contract in
 [`../CLAUDE.md`](../CLAUDE.md) invariant #7; architectural rationale
 and layer-by-layer behaviour in

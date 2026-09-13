@@ -153,7 +153,8 @@ ready clears home (`drive_lost`); PED off at rest refuses motion
 held 20 ms it clears home on every bound element (`alarm`); motion is
 refused (`drive_alarm`) while active. Live levels show on the browser
 page even while disabled, to check the wiring before enabling. Details:
-docs/PROTOCOL.md "Drive feedback".
+docs/PROTOCOL.md "Drive feedback". Operator guide — wiring,
+commissioning, fault recovery: [DRIVE-FEEDBACK.md](DRIVE-FEEDBACK.md).
 
 **Drive timing facts the HAL must honour (iHSS60 manual §5.5):** DIR
 stable ≥ 6 µs before the first PUL edge; DIR unchanged ≥ 5 µs after the
