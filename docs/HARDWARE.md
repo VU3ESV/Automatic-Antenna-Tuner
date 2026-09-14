@@ -27,9 +27,9 @@ The firmware portability rule in [`../CLAUDE.md`](../CLAUDE.md) "MCU
 selection" means every pin assignment and connector pinout below
 must be honoured by `hal/*_teensy41.cpp` *and* by a future
 `hal/*_stm32h7.cpp` Phase 2 port. Keep the physical pinout
-abstractions thin and named — e.g., `STEPPER_L_STEP_PIN`, not the
-raw GPIO number — in `hal/board_*.h` headers, not hard-coded in
-implementation files.
+abstractions thin and named — e.g., `AXIS_X.step`, not the raw GPIO
+number — in `hal/board/*.h` headers (today `hal/board/t41_v209.h`), not
+hard-coded in implementation files.
 
 ## BoM — short form
 
@@ -315,7 +315,7 @@ The iHSS60 closes its position loop internally but reports only
 pass/fail (ALM, PED), so a vacuum-variable capacitor still cannot be
 protected by trusting the pulse counter alone. Protection is by
 layered envelopes — drive currents (P8/P9) and following-error limit
-(P16) set for the geared load via the HISU tool → ALM into a carrier
+(P16) set for the direct-coupled load via the HISU tool → ALM into a carrier
 opto input (fail-safe P10 = 1), any trip stops pulses and clears
 `homed` → `homed:false` motion refusal → per-axis software soft
 limits (default 100 steps inside the switch) → per-axis lead-screw
@@ -350,8 +350,11 @@ These are written incrementally as the build proceeds:
 - **§3 Schematic and PCB notes** — *M1b.2* (Teensy carrier) / *Phase 2*
   (STM32H743 custom carrier per
   [`../CLAUDE.md`](../CLAUDE.md) "MCU selection").
-- **§4 Pin assignments and connector pinouts** — *M1b.2* (must align
-  with `hal/*_teensy41.cpp` once those land).
+- **§4 Pin assignments and connector pinouts** — *M1b.2*. The Teensy
+  drivers landed 2026-09-06 and the pin allocation lives in
+  [`HW-T41-PINMAP.md`](HW-T41-PINMAP.md) §7 and
+  `firmware/tuner-controller/src/hal/board/t41_v209.h`; this section
+  adds the connector pinouts and the harness.
 - **§4a Closed-loop driver feedback inputs (ALM / PED)** — *final
   build*. Carrier opto-input electrical facts and the selected wiring
   are already in [`HW-T41-PINMAP.md`](HW-T41-PINMAP.md) §2.1–2.2; this
@@ -369,7 +372,8 @@ These are written incrementally as the build proceeds:
   |Z| against `[10, 25, 50, 100, 250, 1000] Ω` resistive loads;
   AD8302 ∠Z against `[50−j100, 50−j50, 50, 50+j50, 50+j100]`
   reactive loads; path-length residual against a precision 50 Ω
-  load. The closed-form decode and the sanity gates that consume
+  load; balun / bypass-path de-embedding against known balanced loads
+  at the ladder-line port. The closed-form decode and the sanity gates that consume
   these cal values live in [`RF-DESIGN.md`](RF-DESIGN.md) §4.6 and
   §4.10 respectively.
 - **§7 RF immunity practices in this enclosure** — *M2 / M5*. Cross-

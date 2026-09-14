@@ -1,6 +1,6 @@
 # RF Design
 
-L-network theory, component sizing, detector math, balun spec.
+Balanced-network theory, component sizing, detector math, balun spec.
 Math reference for the auto-tune algorithm
 ([`TUNING.md`](TUNING.md)) and the detector calibration procedure
 ([`HARDWARE.md`](HARDWARE.md) §6).
@@ -13,20 +13,46 @@ in because [`TUNING.md`](TUNING.md) §3 Proposal B/D and
 remaining sections fill in during M2 detector commissioning and M4
 algorithm validation.
 
+**2026-09-05 scope change.** The network is balanced — Balanced L
+(default) or Balanced Pi — behind a 1:1 current balun on the transceiver
+side. §1, §2, §3 and §5 reflect it; the closed form in §3 is unchanged
+apart from `L = 2 × L_leg` for the inductor pair.
+
 ---
 
-## §1 L-network topology recap
+## §1 Network topology recap
 
-See [`../CLAUDE.md`](../CLAUDE.md) "RF topology" for the locked-in
-topology — single series L + single shunt C, with K1 / K2 vacuum
-relays switching the C between the load side (Hi-Z mode) and the
-source side (Lo-Z mode), plus K3 latching the network out of circuit
-in bypass.
+See [`../CLAUDE.md`](../CLAUDE.md) "RF topology" for the contract. In
+short:
 
-What follows assumes that topology. Lossy-element corrections are
+- A fixed **1:1 current balun on the transceiver side** turns the rig's
+  50 Ω unbalanced output into 50 Ω balanced ahead of the network. The
+  directional coupler and V / I taps sit on the unbalanced side, ahead
+  of the balun (§4.2). Everything after the balun is balanced and feeds
+  the ladder line directly.
+- **Balanced L-Network (default):** the series inductance is split
+  between the two line legs as a synchronized pair of roller inductors
+  on one motor, with one vacuum-variable capacitor **across the line**.
+  Two-pole vacuum relays K1 / K2 put the capacitor on the antenna side
+  (Hi-Z mode) or the transceiver side (Lo-Z mode) of the pair; K3
+  latches the network out of circuit in bypass.
+- **Balanced Pi-Network:** C1 across the line on the transceiver side,
+  the inductor pair in series, C2 across the line on the antenna side;
+  no K1 / K2, K3 bypass retained.
+
+**Balanced ↔ unbalanced equivalence.** For the differential signal the
+two series legs add, so `L_leg` in each leg acts as one series
+`L = 2 × L_leg`, and the capacitor across the line is the same capacitor
+as in the unbalanced network. The unbalanced L-network math in §3
+therefore applies unchanged; the master converts the solved `L` to the
+pair's setting through the calibration in §3.4.
+
+What follows assumes the Balanced L. Lossy-element corrections are
 absorbed by the hill-climb refinement step downstream
 ([`TUNING.md`](TUNING.md) §4); the math here is the lossless
-first-order seed.
+first-order seed. The Balanced Pi has one more degree of freedom than a
+match needs (the chosen loaded Q fixes it); its seed math is written
+with its Phase-2 auto-tune.
 
 ---
 
@@ -36,15 +62,23 @@ To be filled in during M2 with measured values across all amateur
 bands on the target Doublet. Short-form sizing guidance (from BoM
 in [`HARDWARE.md`](HARDWARE.md)):
 
-- **Roller inductor**: ~300 nH minimum, ≥ 30 µH maximum. Continuous
-  travel — no taps.
-- **Vacuum-variable capacitor**: 10 – 2000 pF. Voltage rating
-  ≥ 5 kV (≥ 7.5 kV for US legal-limit operation — open decision #4
-  in [`PLAN.md`](PLAN.md)).
-- Both reactive elements rated for full-legal-limit dissipation
-  with 3 dB safety margin per the L-network Q at the worst-case
-  band (typically 160 m on a short Doublet — high Q means high
-  circulating current and large RMS V across the C).
+- **Series inductance** (total, `L = 2 × L_leg`): ~300 nH minimum,
+  ≥ 30 µH maximum — so each of the two matched roller inductors covers
+  ~150 nH to ≥ 15 µH. Continuous travel, no taps; the pair must track
+  across the whole travel (acceptance target in [`PLAN.md`](PLAN.md)
+  M1b.2 "Inductor-pair tracking").
+- **Vacuum-variable capacitor**: e.g. Jennings UCSL-1500, 10 – 1500 pF.
+  Voltage rating ≥ 5 kV (≥ 7.5 kV for US legal-limit operation — open
+  decision #4 in [`PLAN.md`](PLAN.md)); across the line it sees the full
+  line-to-line voltage. One for Balanced L, two (C1, C2) for Balanced
+  Pi. Whether 1500 pF reaches 160 m without switched fixed capacitors in
+  parallel is open decision #10.
+- All reactive elements rated for full-legal-limit dissipation with
+  3 dB safety margin per the network Q at the worst-case band (typically
+  160 m on a short Doublet — high Q means high circulating current
+  through the inductor pair and large RMS V across the C).
+- **Vacuum relays**: two-pole per switch (both line legs), rated for the
+  same line voltage as the capacitor.
 
 Per-band L and C target ranges live in [`TUNING.md`](TUNING.md) §2.
 
@@ -55,8 +89,19 @@ Per-band L and C target ranges live in [`TUNING.md`](TUNING.md) §2.
 The auto-tune algorithm
 ([`TUNING.md`](TUNING.md) Proposal B and the analytic-seed path of
 Proposal D) needs to compute `(L_target, C_target, side)` from a
-measured load impedance `Z_load = R + jX` looking into the tuner
-output port with bypass engaged. Source impedance is `R_s = 50 Ω`.
+measured load impedance `Z_load = R + jX` with bypass engaged. Source
+impedance is `R_s = 50 Ω`.
+
+**Reference plane.** The coupler and V / I taps sit on the 50 Ω side
+ahead of the balun (§4.2), so in bypass they read the ladder-line
+impedance *through* the 1:1 balun and the K3 bypass path, not at the
+network's output terminals where the match is made. That path adds a
+small series impedance and phase shift that grows with frequency. The
+solver must use the reading de-embedded to the network output (§4.9
+step 5); without it the seed is off, most on 10 m and 6 m. The
+hill-climb absorbs what remains.
+For the Balanced L, `L` below is the total series inductance of the
+synchronized pair (§1).
 
 ### §3.1 Side selection
 
@@ -114,7 +159,7 @@ The above gives `(L, C)` in SI units. The controller's `move_l` /
 per-axis calibration curves derived in the M2 install sweep:
 
 ```
-L_steps = L_to_steps( L, f )      # interpolates a measured (steps → henries) table at f
+L_steps = L_to_steps( L, f )      # interpolates the pair's measured (steps → 2 × L_leg) table at f
 C_steps = C_to_steps( C, f )      # mirror
 ```
 
@@ -151,6 +196,10 @@ equations ignore:
   exceed 50).
 - **Stray capacitance across the inductor** (typically 5 – 20 pF —
   matters most at 10 / 6 m where it competes with the intended C).
+- **Inductor-pair mismatch** — the two legs differ slightly at any
+  setting; the imbalance shows up as common-mode current on the ladder
+  line rather than in the differential match (measured in M1b.2,
+  verified at M5).
 - **Balun insertion loss + reflection** (small but present;
   cross-checked with LP-100A-Server in M5).
 - **Common-mode current effects** on the measured `R + jX` — show
@@ -178,7 +227,7 @@ still safe.
 ### §4.1 Signal-flow overview
 
 ```
-                       antenna feedline ─────────────────────────────►
+                       50 Ω from transceiver, to 1:1 balun ───────────►
                                   │
               ┌───────────────────┴───────────────────────────────┐
               │           Tandem-match directional coupler         │
@@ -210,14 +259,17 @@ still safe.
 ```
 
 Every block has a calibration step (§4.9) and a sanity gate (§4.10);
-the algorithm refuses to engage the L-network on telemetry that
+the algorithm refuses to engage the network on telemetry that
 fails any gate.
 
 ### §4.2 RF front-end — coupler + V/I sample taps
 
 **Directional coupler** (Stockton or Tandem-match):
 
-- Located between the L-network and the balun on the tuner output.
+- Located on the 50 Ω unbalanced line between the transceiver port and
+  the 1:1 balun, ahead of the network — the point the rig sees. With
+  bypass engaged it reads the ladder line through the balun; with the
+  network engaged, the match.
 - Coupling factor ≈ −30 dB (1 W on the main line → 1 mW at each
   coupled port).
 - **Directivity ≥ 25 dB** across 1.8 – 54 MHz. Below this, Fwd / Rev
@@ -378,7 +430,7 @@ the enclosure-level practices the firmware assumes. Detector-
 board-specific additions:
 
 - **Inner shield can** over the AD8302 and AD8307 if any one of
-  them sits within λ/4 of the L-network at the highest band.
+  them sits within λ/4 of the network at the highest band.
 - **Feed-through caps** on every wire entering / leaving the
   detector board (V_fwd, V_rev, V_mag, V_phs out; +5 V in; ground).
 - **Ferrite beads** on the ADC signal lines at the detector-board
@@ -410,6 +462,12 @@ this section is the *what* and *why*.
 4. **Path-length residual** — with a pure 50 Ω load, V_phs should
    read 0° at every frequency. Any residual is V↔I path-length
    error; store as a per-band phase offset added to every reading.
+5. **Balun + bypass-path de-embedding** — with bypass engaged,
+   terminate the ladder-line port in known balanced loads (resistive,
+   e.g. 50 / 200 / 600 Ω, plus a ±jX pair) at each band and fit a
+   per-band correction from the coupler reference plane to the
+   network's output terminals, so §3 solves against the load the
+   network actually sees.
 
 Calibration is stored in TOML on the master and pushed to the
 controller on connect (per [`../CLAUDE.md`](../CLAUDE.md) "Config").
@@ -426,7 +484,7 @@ The controller runs three gates:
   component change, or a cable fault.
 - **Saturation detection.** Any ADC channel pegging above 95 % of
   full scale → `status error:cal_missing` with the channel ID and
-  refuse to engage the L-network. Almost always means coupler
+  refuse to engage the network. Almost always means coupler
   attenuation insufficient or chip-side pad missing (§4.3).
 - **Path consistency.** If the AD8302 reports `|Z| ≈ 50 Ω` but the
   AD8307s report `SWR > 1.5`, the V/I sample paths and the coupler
@@ -470,9 +528,12 @@ from [`TUNING.md`](TUNING.md)) — the chain has to earn its trust.
 To be filled in during M5 commissioning. Short-form spec from
 [`../CLAUDE.md`](../CLAUDE.md):
 
-- **1:1 or 4:1 current balun** on the tuner output (1:1 vs 4:1
-  decided at M5 from measured ladder-line impedances — open
-  decision #3 in [`PLAN.md`](PLAN.md)).
+- **1:1 Guanella current balun on the transceiver side**, fixed,
+  converting the rig's 50 Ω unbalanced output to 50 Ω balanced ahead of
+  the network. Because it always works at its design impedance, the
+  ratio question (former open decision #3 in [`PLAN.md`](PLAN.md)) was
+  closed by the 2026-09-05 topology change; M5 verifies leg-current
+  balance and ladder-line common-mode current instead.
 - **Ferrite**: Fair-Rite **43** mix (broadband 1 – 30 MHz) or **31**
   mix (lower bands and lower-loss high-Q operation), sized for
   ≥ 3 kW continuous dissipation safety margin.

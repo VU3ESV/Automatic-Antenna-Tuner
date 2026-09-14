@@ -22,9 +22,11 @@ re-matching the feedline to the 50 Ω transceiver. The status quo is:
 ## Goal
 
 Replace the manual tuner with an **automatic antenna tuner** for the
-same Doublet — built around an **L-Match by default**, with **T-Match
-and Pi-Match topologies also first-class supported** (selected once at
-install time, declared to the firmware via configuration). The design
+same Doublet — built around a **Balanced L-Network by default**, with
+the **Balanced Pi-Network also first-class supported** (selected once at
+install time and declared to the firmware together with the
+element→motor map), fed through a fixed 1:1 current balun on the
+transceiver side. The design
 shares the station's existing automation pattern
 ([LP-100A-Server](https://github.com/VU3ESV/LP-100A-Server)): one Go
 process on a Raspberry Pi owns the hardware, fans out telemetry over
@@ -63,13 +65,17 @@ UI.
 Phase 1 (M0 – M6, the committed delivery) intentionally does **not**
 target:
 
-- T-Match / Pi-Match **auto-tune**. Phase 1 ships the L-Match search
-  algorithm fully wired; T and Pi topologies are supported through the
+- Balanced Pi-Network **auto-tune**. Phase 1 ships the Balanced L
+  search algorithm fully wired; the Balanced Pi is supported through the
   HAL and protocol layer for "drive each element to a commanded
-  position", but the search/auto-tune work is deferred. T/Pi installs
-  in Phase 1 are operator-driven via the encoders and *Save* button.
-- Balanced-line tuning without a balun. The 1:1 current balun on the
-  output is part of the architecture, not an option.
+  position", but its search / auto-tune work is deferred. Balanced Pi
+  installs in Phase 1 are operator-driven via the encoders and *Save*
+  button.
+- Unbalanced L / T / Pi networks with an output balun (the 2026-05
+  design). Superseded on 2026-09-05 by the balanced networks; T-Match is
+  no longer supported.
+- Tuning without a balun. The 1:1 current balun on the transceiver side
+  is part of the architecture, not an option.
 - Cloud relay or NAT traversal. LAN-only, like LP-100A-Server.
 - Long-term logging / charting of match data. A separate InfluxDB
   subscriber can do this if wanted, out of scope here.
@@ -96,16 +102,22 @@ Phase 2 SO2R behaviour.
 
 ## Design rationale
 
-- **L-Match as default, T/Pi as opt-in** — L wins on efficiency
-  (two reactive elements vs. three; lower insertion loss on near-50 Ω
-  loads) and matches the operator's Doublet impedance ranges across
-  all amateur bands when the C is switchable to either side via vacuum
-  relays. T-Match and Pi-Match are supported in the firmware /
-  protocol / HAL because the chosen carrier already has the stepper
-  and relay channels to drive them, and a future build (or a different
-  operator's antenna) may favour the wider impedance range of T or the
-  band-edge behaviour of Pi. Selection is install-time, persisted on
-  the controller.
+- **Balanced networks for a ladder-line feed (2026-09-05).** The 1:1
+  current balun sits on the transceiver side, where it always sees its
+  50 Ω design impedance, and the network drives the ladder line
+  directly — instead of an output balun facing the hundreds or
+  thousands of ohms the ladder line presents. The series inductance is
+  split between the legs as two matched roller inductors on one motor,
+  so the legs stay balanced and the firmware still sees one `L` axis.
+- **Balanced L as default, Balanced Pi as opt-in** — L wins on
+  efficiency (two reactive elements vs. three; lower insertion loss on
+  near-50 Ω loads) and covers the Doublet's impedance ranges across all
+  amateur bands when the capacitor is switchable to either side via
+  vacuum relays. The Balanced Pi covers both impedance ranges without a
+  selector at the cost of a third axis, and the carrier already has the
+  stepper and relay channels to drive it. Selection is install-time,
+  persisted on the controller, with an operator-chosen element→motor
+  map.
 - **Off-the-shelf Teensy-4.1 carrier (grblHAL-teensy-4.x V2.09)** for
   Phase 1 hardware. Spares a custom-PCB spin and brings the 5 stepper
   channels, 10 opto-isolated inputs, and 7 relay drivers we need
@@ -121,10 +133,16 @@ Phase 2 SO2R behaviour.
   station's existing LP-100A-Server, with the same client-fan-out
   semantics — one less protocol to debug. See
   [docs/PROTOCOL.md](docs/PROTOCOL.md) for the wire spec.
-- **Incremental quadrature encoders + NVRAM anchor** as the position
-  truth rather than absolute SSI: cost, wiring, and industrial track
-  record all point to incremental. See
-  [docs/ARCHITECTURE.md §5.2](docs/ARCHITECTURE.md) for the trade-off.
+- **Integrated closed-loop drives, coupled directly, with an anchored
+  pulse counter** as the position truth (2026-09-05). The JMC iHSS60
+  closes its position loop inside the drive, so the controller's exact
+  pulse count equals the shaft position while ALM is clear and PED
+  confirms each move. Direct coupling puts full motor torque at the
+  element; a 3:1 belt-driven lead screw beside each axis carries the
+  home and max limit switches, so the switches, not the element, take
+  the contact. No external encoder is needed. See
+  [docs/HARDWARE.md](docs/HARDWARE.md) "Drive train" and
+  [docs/ARCHITECTURE.md §5.2](docs/ARCHITECTURE.md).
 - **Sim HAL before real drivers** because the master ↔ controller
   protocol can be exercised end-to-end (verb dispatch, RF lockout,
   state fan-out, UI controls) without waiting on the hardware build —
@@ -138,9 +156,11 @@ Phase 2 SO2R behaviour.
 
 ## Bench-test learnings (to fold into design)
 
-Notes captured during early hardware bring-up that the milestones (or
-the HAL) need to absorb. Each one is currently a known-issue; none is
-fixed in the eventual tuner-controller firmware yet.
+Notes captured during hardware bring-up that the milestones (or the
+HAL) need to absorb. The production tuner-controller firmware (since
+2026-09-06) already absorbs the hardware pulse generation, the iHSS60
+timing and the ISR `dsb` fix; the TB6600 notes stay for anyone re-using
+the bench rigs.
 
 - **Stepper pulses must be hardware-generated, not main-loop-polled.**
   Bench tests on an ESP32-C6 + TB6600 + NEMA 23 rig (firmware/test/esp32c6-
@@ -153,9 +173,10 @@ fixed in the eventual tuner-controller firmware yet.
   silencing the trace log; the proper fix — codified into the
   CLAUDE.md "Firmware portability rule" — is hardware pulse generation
   (FlexPWM on Teensy 4.1, TIM+DMA on STM32H743) with the main loop free
-  to do persistence, networking, and UI work. Encoders catch the residual
-  open-loop error per invariant 3, but step accuracy should still be
-  achieved at the source.
+  to do persistence, networking, and UI work. The closed-loop iHSS60
+  corrects residual error inside the drive and reports a trip on ALM,
+  but step accuracy should still be achieved at the source: the
+  controller's pulse count is the position truth (invariant 3).
 - **TB6600 ENA polarity is inverted from the datasheet's plain reading.**
   Energising the ENA opto **disables** the driver — i.e. with common-
   cathode wiring (signal− to GND, signal+ to GPIO), `LOW` on ENA+ enables
@@ -170,13 +191,11 @@ fixed in the eventual tuner-controller firmware yet.
   current.** At 3.5 A per phase the standstill PWM hiss is intrusive.
   The test sketch mitigates by auto-releasing ENA after a configurable
   idle timeout (3 s default, persisted across reboots), trading holding
-  torque for silence — acceptable for shafts with mechanical detent /
-  friction (roller inductor, vacuum cap), unsafe for back-drivable
-  loads. This is a TB6600-specific symptom and not a production concern
-  — CLAUDE.md hardware contract already specifies **TMC2209 in
-  StealthChop** for the production tuner, which is essentially silent
-  at standstill. The "release ENA when idle" behaviour is still worth
-  porting to the production HAL as an opt-in low-power mode.
+  torque for silence. This is a TB6600-specific symptom, not a
+  production concern, and the "release ENA when idle" behaviour must
+  **not** be ported to the production HAL: a direct-coupled vacuum
+  capacitor can be back-driven by its bellows, so invariant 3 requires
+  the drives to stay enabled whenever the controller is powered.
 - **Open-network APs are unreliable on macOS clients.** During OTA
   bring-up the captive-portal setup AP needed a WPA2 password to be
   visible from a Mac; Windows 11 saw it open. Not load-bearing for the
@@ -194,11 +213,13 @@ fixed in the eventual tuner-controller firmware yet.
   200 kHz maximum exactly at the limit of a 50 %-duty train. Its ALM
   (fault / following-error) and PED (in-position) opto outputs can sink
   the V2.09 carrier's opto-input LED current directly with no added
-  parts — candidate wiring and the open final-build checks are in
+  parts — wiring and the open final-build checks are in
   [docs/HW-T41-PINMAP.md](docs/HW-T41-PINMAP.md) §2.1–2.2. The iHSS60
-  was adopted into the CLAUDE.md hardware contract on 2026-09-05;
-  final-build verification of the wiring is logged in
-  [docs/PLAN.md](docs/PLAN.md) M5.
+  was adopted into the CLAUDE.md hardware contract on 2026-09-05, and
+  the firmware has supervised PED / ALM since 2026-09-13, opt-in until
+  the lines are wired ([docs/DRIVE-FEEDBACK.md](docs/DRIVE-FEEDBACK.md)).
+  With the drive defaults, PED (P14 = 1) shows a loss of motor power
+  and ALM (P10 = 0) does not.
 - **Cortex-M7 peripheral-flag clears need a `dsb` before the ISR
   returns.** The FlexPWM reload ISR that counts step pulses cleared its
   flag with a posted write and returned before it landed, so the NVIC
@@ -212,12 +233,17 @@ fixed in the eventual tuner-controller firmware yet.
 ## Status
 
 Milestone-by-milestone state lives in [docs/PLAN.md](docs/PLAN.md).
-Current state (2026-05-11):
+Current state (2026-09-14):
 
 - **M0** scaffolding: ✅
 - **M1a** software scaffold: ✅
 - **M1b.1** network bridge (Teensy → master → browser): ✅
-- **M1b.2** software half (sim HAL + verb dispatch + Operate panel): ✅
-- **M1b.2** real driver wiring, **M2** measurement chain, **M3** master
-  core (CAT / ANO encoders / SQLite memory), **M4** auto-tune algorithm,
-  **M5** RF commissioning, **M6** hardening: pending hardware build.
+- **M1b.2** production firmware on the T41 V2.09 carrier — real motor /
+  relay / limit / NVRAM backends, `set_topology` with the element→motor
+  map, firmware update over Ethernet: ✅ (2026-09-06); opt-in PED / ALM
+  drive supervision: ✅ (2026-09-13). Lead-screw limit mechanism, relay
+  wiring and PED / ALM wiring: pending hardware.
+- **M2** measurement chain, **M3** master core (CAT / ANO encoders /
+  SQLite memory), **M4** auto-tune algorithm, **M5** RF commissioning:
+  pending. **M6** hardening: Pi deploy pipeline and controller
+  reconnect done; the rest pending.

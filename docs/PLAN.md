@@ -12,10 +12,10 @@ For the architecture this plan implements, see
 
 ## Milestone overview
 
-| M  | Name                        | Deliverable                                                                                            | Status (2026-05-11)                              |
+| M  | Name                        | Deliverable                                                                                            | Status (2026-09-14)                              |
 |----|-----------------------------|--------------------------------------------------------------------------------------------------------|--------------------------------------------------|
 | M0 | Scaffolding                 | Repo skeleton, CI, two binaries that build and exchange a heartbeat.                                   | **✅** (master + firmware skeleton + CI)         |
-| M1 | Motion + position           | iHSS60 axes drive the elements directly, homed by belt-driven lead-screw limit switches; bypass + relay state machine; faked RF. | **M1a ✅ · M1b.1 ✅ · M1b.2 real drivers on the T41 carrier ✅ (2026-09-06) · lead-screw limit mechanism + ALM/PED pending HW** |
+| M1 | Motion + position           | iHSS60 axes drive the elements directly, homed by belt-driven lead-screw limit switches; bypass + relay state machine; faked RF. | **M1a ✅ · M1b.1 ✅ · M1b.2 real drivers on the T41 carrier ✅ (2026-09-06) · PED/ALM supervision firmware ✅ (2026-09-13, off until wired) · lead-screw limit mechanism, relay and PED/ALM wiring pending HW** |
 | M2 | Measurement                 | AD8302 + dual AD8307 chains live; SWR, R, X reported in `telemetry`.                                   | Pending hardware                                  |
 | M3 | Master core + GUI           | Go master with embedded web UI, CAT polling, ANO encoders, memory store.                               | Partial — UI + WS hub + Operate panel + command forwarding done; CAT / ANO encoders / SQLite memory pending |
 | M4 | Auto-tune algorithm         | Recall + analytic L-network solve + hill-climb fine-tune, validated on a dummy load network.           | Pending M2/M3                                     |
@@ -51,14 +51,17 @@ M3 (settings page), M4 (`L = 2 × L_leg`), M5 (leg-current balance,
 drive-train checks), Phase 2 (Balanced Pi auto-tune, optional fixed-cap
 bank).
 
-- [ ] **Reconcile the remaining docs** that still describe the
-      unbalanced design: `ARCHITECTURE.md` (§5.1.3 done 2026-09-06;
-      §2 / §4 still unbalanced), `RF-DESIGN.md`, `HW-T41-CARRIER.md`,
-      `HW-T41-PINMAP.md` (two-switch axes, opto-input budget, relay
-      pairs), `TUNING.md`, `../README.md`, `../PROPOSAL.md`.
-      Done 2026-09-06: `PROTOCOL.md` (`set_topology`, `move_axis`,
-      per-axis `state` fields) and the axis-mapping comment in
-      `firmware/tuner-controller/src/hal/board/t41_v209.h`.
+- [x] **Reconcile the remaining docs** that still described the
+      unbalanced design. Done 2026-09-06: `PROTOCOL.md` (`set_topology`,
+      `move_axis`, per-axis `state` fields) and the axis-mapping comment
+      in `firmware/tuner-controller/src/hal/board/t41_v209.h`. Done
+      2026-09-14: `ARCHITECTURE.md` (§1 system view, §2 topologies, §3
+      reference plane, §4, §5.2 position truth, §5.4 memory schema, §6,
+      §7), `RF-DESIGN.md` (§1, §2, §3, §4.2 coupler placement, §5 balun),
+      `HW-T41-CARRIER.md`, `HW-T41-PINMAP.md` (two switches per axis on
+      one input, relay pairs), `TUNING.md`, the `EXTENSIONS.md` recap,
+      the `PROTOCOL.md` `memory` frame, `../README.md` (stack at a
+      glance, status) and `../PROPOSAL.md`.
 
 Numbers below assume one operator and an existing bench (scope, signal
 generator, dummy load + reactive simulator, RF wattmeter). Calendar weeks
@@ -244,13 +247,13 @@ End-to-end: Teensy → master → browser shows real controller state.
       switches and PED confirmation. Same day: third bench axis `Z` on
       the carrier's Z channel (FlexPWM2.2, own EEPROM block), so the
       rig now covers a Balanced Pi motor count.
-- [ ] **Carrier-board bring-up** — assemble / verify Phil Barrett's
-      grblHAL-teensy-4.x V2.09 board (T41E5XBB SKU for Ethernet) and
-      author `firmware/tuner-controller/hal/board/t41_v209.{h,cpp}`
-      with the pin map, relay-polarity, and opto-input-polarity for
-      this carrier. Bare-Teensy dev wiring keeps working via a
-      `hal/board/bench.h` env. Plan + reference URLs:
-      [`HW-T41-CARRIER.md`](HW-T41-CARRIER.md).
+- [x] **Carrier-board bring-up** — Phil Barrett's grblHAL-teensy-4.x
+      V2.09 board (T41E5XBB SKU for Ethernet) has run the production
+      firmware on the bench since 2026-09-06;
+      `firmware/tuner-controller/src/hal/board/t41_v209.{h,cpp}` holds
+      the pin map, relay polarity and opto-input polarity. The planned
+      bare-Teensy `hal/board/bench.h` env was not needed. Plan +
+      reference URLs: [`HW-T41-CARRIER.md`](HW-T41-CARRIER.md).
 - [ ] Wire two iHSS60 integrated closed-loop steppers (`L`-pair, `C`)
       via the carrier's axis-0/axis-1 STEP/DIR/EN screw terminals (a
       third, axis 2, for a Balanced Pi build). DIP = 6400 p/r; P8/P9
@@ -298,7 +301,8 @@ End-to-end: Teensy → master → browser shows real controller state.
       measured leg currents). Decide and document how the two coils are
       phased so both rollers travel the same way.
 - [ ] Implement `motor` task with trapezoidal accel/decel; verify motion
-      profile on scope.
+      profile on scope. *(Ramps implemented in `motor_teensy41.cpp`,
+      2026-09-06; the scope check is still open.)*
 - [ ] *(Phase-2 fallback only — a non-integrated motor; the iHSS60 has
       no external encoder.)* Wire quadrature encoders into the Teensy's
       hardware QEI peripherals.
@@ -330,11 +334,16 @@ End-to-end: Teensy → master → browser shows real controller state.
       only exercises the Balanced L path end-to-end; Balanced Pi lands
       as an inert switch arm (motion HAL works for any declared axis
       count, but the Balanced-L-specific `set_side` is rejected with
-      `wrong_topology` on a Pi install).
+      `wrong_topology` on a Pi install). *(Verb, validation —
+      `duplicate_axis` / `bad_axis` / `bad_elements` — NVRAM
+      persistence and `wrong_topology` done 2026-09-06 in `app/config`
+      and `app::motion`; see PROTOCOL.md.)*
 - [ ] Wire vacuum relays through optoisolated MOSFET drivers + HV bias;
       each logical relay is two-pole (both line legs; paralleled coils
       on one driver, or a DPST/DPDT unit). Implement K1/K2
-      mutual-exclusion + K3 override in firmware.
+      mutual-exclusion + K3 override in firmware. *(Firmware side done
+      2026-09-06 in `relay_teensy41.cpp`: break-before-make K1/K2,
+      bypass de-energised and latched first at boot. Wiring open.)*
 - [x] `safety` task: refuses `move_l`/`move_c`/`set_side`/`home` when
       `fwd_w >= tx_lockout_w` (5 W default). Master can drive the
       fake reading via the `set_fwd_w` debug verb so the lockout path
@@ -358,7 +367,8 @@ axes from end to end via the GUI and via the ANO encoders, see live
 position update in two browsers simultaneously, and any attempt to move
 during a faked TX is refused with a visible lockout banner.
 
-**State (2026-05-11):**
+**State (2026-05-11, against the sim HAL — superseded from 2026-09-06 by
+the real drivers listed above):**
 - GUI drive ✅ — Operate panel ships ±10/±100/±1000 step nudges per
   axis, Hi-Z/Lo-Z toggle, bypass engage/release, and a "Re-home both
   axes" button. Verified against the sim HAL on a real Teensy 4.1.
@@ -532,7 +542,7 @@ the tuner's own chain and the LP-100A as a cross-check.
       [`HW-T41-PINMAP.md`](HW-T41-PINMAP.md) §2.2 with ≈ 10 mA LED
       current and a clean LOW at the Teensy; P10 = 1 fail-safe
       polarity (cable-open reads as fault); P16 following-error limit
-      set for the geared load; firmware stops pulses and drops
+      set for the direct-coupled load; firmware stops pulses and drops
       `homed` on ALM, and waits for PED before persisting position.
       Record the per-axis drive parameters (P8/P9/P10/P14/P16, DIP
       setting) in `docs/HARDWARE.md` §4a.
@@ -706,8 +716,8 @@ the architecture, only the BoM:
 2. **Ethernet library.** **QNEthernet** (lwIP) is the default; the
    build also supports **NativeEthernet** (FNET) via a separate PIO env
    for A/B testing and to match the Morconi / TeensyMaestro convention.
-   The abstraction lives in `src/net_hal.{h,*.cpp}`; the choice is a
-   one-line change in `platformio.ini`. See
+   The abstraction lives in the shared `firmware/lib/net_hal/` library;
+   the choice is a one-line change in `platformio.ini`. See
    [`ARCHITECTURE.md`](ARCHITECTURE.md) §5.1.2.
 3. **Balun ratio.** *Resolved 2026-09-05 by the topology change:* 1:1
    Guanella current balun on the transceiver side, working at 50 Ω. M5

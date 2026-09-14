@@ -15,7 +15,7 @@ break, see [`CLAUDE.md`](../CLAUDE.md). For *what to build first*, see
    │   Transceiver ──CAT (USB)──► Master Controller ──HDMI──► Touchscreen│
    │       │                          (Raspberry Pi 4/5)                 │
    │       │  coax (50 Ω)              │                                 │
-   │       │                           ├── 2× Adafruit ANO encoders (GPIO)│
+   │       │                           ├── Adafruit ANO ×2–3 (GPIO)      │
    │       │                           ├── Ethernet (LAN)                │
    │       │                           └── (optional) LP-100A-Server WS  │
    │       ▼                                                             │
@@ -31,72 +31,95 @@ break, see [`CLAUDE.md`](../CLAUDE.md). For *what to build first*, see
    │   ┌────────────────────────────────────────────────────────────┐    │
    │   │  Tuner Controller  (Teensy 4.1 on grblHAL V2.09 carrier)    │    │
    │   │   ┌────────────┐  ┌────────────┐  ┌───────────────┐         │    │
-   │   │   │ Motor loop │  │ ADC sampler│  │ WS/JSON server│◄── LAN ─┼────┘
-   │   │   │ (FlexPWM   │  │ (Fwd, Rev, │  │ (lwIP, ~5 cli)│         │
-   │   │   │  steppers, │  │  AD8302 I/Q│  │               │         │
-   │   │   │  optional  │  │  log dets) │  │               │         │
-   │   │   │  encoders) │  │            │  │               │         │
+   │   │   │ Motor loop │  │ ADC sampler│  │ JSON server   │◄── LAN ─┼────┘
+   │   │   │ (FlexPWM   │  │ (Fwd, Rev, │  │ TCP :8089 +   │         │
+   │   │   │  steppers, │  │  AD8302 I/Q│  │ HTTP :80      │         │
+   │   │   │  ALM / PED,│  │  log dets) │  │               │         │
+   │   │   │  limits)   │  │            │  │               │         │
    │   │   └─────┬──────┘  └─────┬──────┘  └───────┬───────┘         │
    │   │         │               │                 │                 │
    │   │         ▼               ▼                 ▼                 │
    │   │   ┌────────────┐  ┌────────────┐  ┌───────────────┐         │
-   │   │   │ iHSS60 ×2  │  │ Detector   │  │ Relay drivers │         │
+   │   │   │ iHSS60 ×2–3│  │ Detector   │  │ Relay drivers │         │
    │   │   │ closed-loop│  │  bias supply│ │ (K1/K2/K3 HV) │         │
    │   │   └─────┬──────┘  └────┬───────┘  └──────┬────────┘         │
    │   └─────────┼───────────────┼─────────────────┼──────────────────┘
    │             ▼               ▼                 ▼
    │   ┌──────────────────────┐ ┌──────────────────┐  ┌─────────────────┐
-   │   │ Roller L             │ │ Directional      │  │ Vacuum relays   │
-   │   │ iHSS60 (NEMA 24, CL) │ │ coupler (Tandem) │  │ K1: load-side C │
-   │   │ + gearbox            │ │  → Fwd/Rev to    │  │ K2: src-side C  │
-   │   │                      │ │  AD8307 ×2,      │  │ K3: bypass      │
-   │   │ Vac variable C       │ │  AD8302 phase    │  └─────────────────┘
-   │   │ iHSS60 (NEMA 24, CL) │ │                  │
-   │   │ + gearbox            │ │  ALM / PED from  │
-   │   │                      │ │  each iHSS60 →   │
-   │   │                      │ │  carrier opto in │
+   │   │ Roller-L pair (L)    │ │ Directional      │  │ Vacuum relays,  │
+   │   │ one iHSS60, direct;  │ │ coupler (Tandem) │  │ two-pole each   │
+   │   │ 2nd coil on 1:1 belt │ │  → Fwd/Rev to    │  │ K1: C ant. side │
+   │   │                      │ │  AD8307 ×2,      │  │ K2: C TX side   │
+   │   │ Vac variable C (C1/2)│ │  AD8302 phase    │  │ K3: bypass      │
+   │   │ iHSS60, direct       │ │                  │  │ (K1/K2: Bal. L) │
+   │   │                      │ │  ALM / PED from  │  └─────────────────┘
+   │   │ each axis: 3:1 belt  │ │  each iHSS60 →   │
+   │   │ → lead screw → home/ │ │  carrier opto in │
+   │   │ max limit switches   │ │                  │
    │   └──────────────────────┘ └──────────────────┘
    │                                       ▲
    │                                       │
-   │      RF path:  TX ──► coupler ──► L-network (with relays) ──► BALUN
-   │                                                              │
-   └──────────────────────────────────────────────────────────────┼──────┘
-                                                                  ▼
-                                                          Open-wire 460/600 Ω
-                                                          ladder line → Doublet
+   │   RF path:  TX ──► coupler ──► 1:1 BALUN ──► balanced network ──┐
+   │                                             (L-pair, C, relays) │
+   └─────────────────────────────────────────────────────────────────┼───┘
+                                                                     ▼
+                                                             Open-wire 460/600 Ω
+                                                             ladder line → Doublet
 ```
 
-## 2. RF / L-network design
+## 2. RF / network design
 
 See [`RF-DESIGN.md`](RF-DESIGN.md) for component sizing and detector math;
-this section is the topology and operating mode summary.
+this section is the topology and operating-mode summary. The contract is
+[`../CLAUDE.md`](../CLAUDE.md) "RF topology".
 
 ### 2.1 Topology
 
-The network is the standard reconfigurable **two-element L** with the shunt
-capacitor electrically movable to either side of the series inductor by a
-pair of vacuum relays (K1, K2). A third vacuum relay (K3) shorts the
-network out of circuit ("bypass") for safe boot and for moving the L/C
-during retune.
+Two **balanced** networks are supported, chosen at install time with
+`set_topology`: the **Balanced L-Network** (default) and the **Balanced
+Pi-Network**. Both sit behind a fixed **1:1 current balun on the
+transceiver side**, so the balun always works at 50 Ω, and both feed the
+ladder line directly. The series inductance is split between the line
+legs as **two matched roller inductors on one motor** — one firmware
+axis, electrically `L = 2 × L_leg` — and every switch is **two-pole** so
+both legs switch together.
+
+**Balanced L-Network** — the inductor pair in series and one
+vacuum-variable capacitor across the line, placed on either side of the
+pair by K1 / K2:
 
 ```
-        K3 (bypass)
-   ┌──────/ ──────┐
-   │              │
-TX ─┴── Lvar ─────┴── BALUN ── ladder line
-        │   │
-        │   └── K1 (load-side shunt) ─── Cvar ──┐
-        │                                       │
-        └── K2 (source-side shunt) ──── Cvar ───┘
-                       ▲
-                       └── single shared variable cap, switched onto whichever rail K1/K2 selects
+HI-Z (Zload > 50 Ω): K1 closed, K2 open — C across the antenna side
+
+TX ── SWR/Z ── 1:1 ──┬── L_leg ───────┬──── ladder
+              BALUN  │   (sync'd)     ═ C        line
+                     └── L_leg ───────┴────
+
+LO-Z (Zload < 50 Ω): K1 open, K2 closed — C across the transceiver side
+
+TX ── SWR/Z ── 1:1 ──┬────┬── L_leg ────── ladder
+              BALUN  │    ═ C  (sync'd)     line
+                     └────┴── L_leg ──────
 ```
 
-Only **one of K1 / K2** is closed at any time. K3 is independent and
-overrides the rest (bypass = "RF passes straight through to balun, network
-sees no current").
+Only **one of K1 / K2** is closed at any time. K3 is a two-pole
+changeover that connects the balun output straight to the ladder line
+and overrides the rest (bypass = the network sees no current).
+
+**Balanced Pi-Network** — C1 across the line on the transceiver side,
+the inductor pair in series, C2 across the line on the antenna side. It
+covers both impedance ranges by itself, so K1 / K2 are absent; the K3
+bypass is retained (invariant 2).
+
+```
+TX ── SWR/Z ── 1:1 ──┬────┬── L_leg ──┬──── ladder
+              BALUN  │    ═ C1 (sync'd)═ C2       line
+                     └────┴── L_leg ──┴────
+```
 
 ### 2.2 Operating modes
+
+Balanced L:
 
 | Mode      | K1   | K2   | K3   | When chosen                                           |
 |-----------|------|------|------|-------------------------------------------------------|
@@ -104,6 +127,9 @@ sees no current").
 | Hi-Z      | clsd | open | open | Measured Zload Re part > 50 Ω at the tuner input.     |
 | Lo-Z      | open | clsd | open | Measured Zload Re part < 50 Ω at the tuner input.     |
 | Forbidden | clsd | clsd | —    | Never. Firmware enforces mutual exclusion.            |
+
+Balanced Pi has only **Bypass** (K3 closed) and **Engaged** (K3 open);
+`set_side` is refused with `wrong_topology`.
 
 ### 2.3 Coverage targets
 
@@ -124,6 +150,10 @@ sees no current").
 These are *first-cut* envelope estimates for a Doublet on 600 Ω ladder line
 of typical length. The exact range is calibrated empirically at install —
 the memory table is the operational ground truth, not these numbers.
+L is the total series inductance of the pair (`2 × L_leg`), so each
+roller inductor covers half the range. The ranges are for the Balanced
+L; a Balanced Pi's C1 / C2 ranges depend on the loaded Q chosen and are
+set with its Phase-2 auto-tune.
 
 ## 3. Measurement chain
 
@@ -138,15 +168,16 @@ Three measurements, all sampled by the tuner-side MCU's 16-bit ADC:
 3. **Complex impedance** — **AD8302 gain/phase detector** fed by samples of
    `V` (load voltage) and `I` (load current) taken from a small Stockton
    current transformer and a capacitive voltage tap, both calibrated to a
-   common reference plane at the **tuner input port** (before L, before
-   K1/K2 split).
+   common reference plane at the **tuner input port** (on the unbalanced
+   50 Ω side, ahead of the balun and the network).
    - AD8302 `Vmag` output → ratio `|V|/|I|·k` → `|Z|`.
    - AD8302 `Vphs` output → angle of `V/I` → `∠Z`.
    - Then `R = |Z|·cos(∠Z)`, `X = |Z|·sin(∠Z)`.
 
 The AD8302 is needed because SWR alone cannot tell us *which side* of 50 Ω
 we're on — a 25 Ω load and a 100 Ω load both read SWR=2. The phase/magnitude
-chain breaks that ambiguity, which is what picks Hi-Z vs Lo-Z (K1 vs K2).
+chain breaks that ambiguity, which is what picks Hi-Z vs Lo-Z (K1 vs K2)
+on a Balanced L.
 
 ADC sampling runs at **~10 kSPS per channel**, IIR-smoothed for telemetry
 (~30 Hz update rate to clients), and **raw** for the auto-tune algorithm so
@@ -155,7 +186,10 @@ hill-climbing sees the instantaneous match.
 ## 4. Tuning algorithm
 
 The master is the brain; the controller is the manipulator. The master
-decides "what L, C, side to be at"; the controller executes.
+decides which element positions (and, on a Balanced L, which side) to
+be at; the controller executes. Auto-tune is Balanced-L-only in Phase 1;
+a Balanced Pi install is tuned with the encoders and recalls saved
+positions.
 
 The full strategy comparison — including the universal per-tune
 safety protocol (forced by invariant #1), the per-band starting-condition
@@ -166,12 +200,13 @@ trade-offs and `RF-DESIGN.md` §3 for the closed-form L-network math.
 
 **Project decision: Proposal D — hybrid memory-first with analytic
 fallback.** On any `recall(freq_hz)` (driven by either CAT polling or
-operator action), the master looks up `(l_steps, c_steps, side)` from
-SQLite by `(band, bucket = round(freq_hz / bucket_size))`. On a hit
+operator action), the master looks up the element positions and `side`
+from SQLite by `(topology, band, bucket = round(freq_hz / bucket_size))`.
+On a hit
 within `swr_recall_threshold` (default 1.5), it engages bypass, moves
 both axes in parallel, restores `side`, disengages bypass, and reports.
 On a miss or a stale slot it measures `R, jX` in bypass mode, computes
-the analytic L-network solution to seed a starting point, moves there,
+the analytic L-network solution (`L = 2 × L_leg` for the pair) to seed a starting point, moves there,
 and then hill-climbs on SWR until `≤ swr_done_threshold` (default 1.10).
 Successful tunes prompt the operator to save (auto-save disabled by
 default per invariant #4). Typical recall time **< 4 s**; cold-start
@@ -179,17 +214,19 @@ auto-tune 15 – 60 s.
 
 ### 4.3 Operator nudge
 
-Outside of recall/auto-tune, the operator can rotate either Adafruit ANO
-encoder to manually nudge L or C in single microsteps (or coarse steps if
-the encoder is pressed-and-rotated — push acts as a coarse/fine modifier).
+Outside of recall/auto-tune, the operator rotates an Adafruit ANO encoder
+— one per element axis: two on a Balanced L, three on a Balanced Pi — to
+nudge that element in single steps (or coarse steps if the encoder is
+pressed-and-rotated — push acts as a coarse/fine modifier).
 The 5-way directional pad on each encoder:
 
 - **Up/Down** = ±10× the rotary step (coarse).
 - **Left/Right** = switch side (Lo-Z ↔ Hi-Z), with bypass auto-engaged.
+  Balanced L only.
 - **Centre push** = save current as memory for current QRG.
 
-Encoder events go to the master, the master sends `move_l`/`move_c`/
-`set_side` verbs, the controller broadcasts `state` after each move so the
+Encoder events go to the master, the master sends `move_axis` (or the
+Balanced-L `move_l` / `move_c` aliases) and `set_side` verbs, the controller broadcasts `state` after each move so the
 GUI live-tracks reality.
 
 ## 5. Software architecture
@@ -228,11 +265,11 @@ hardware timer ISRs; no full RTOS required for this load):
 
 | Task          | Period / trigger     | Responsibility                                                       |
 |---------------|----------------------|----------------------------------------------------------------------|
-| `motor`       | 50 µs (ISR)          | Step pulse generation, microstep timing, accel/decel ramps.          |
-| `encoder`     | hardware QEI         | Quadrature decode in hardware; firmware reads on each move-complete. |
+| `motor`       | FlexPWM + reload ISR | Hardware step pulses counted in the ISR; ramps serviced from `tick()`. |
+| `feedback`    | every loop pass      | iHSS60 PED / ALM levels and limit inputs; external QEI only on a non-integrated motor. |
 | `adc`         | 100 µs DMA           | Free-running ADC of 4 channels (Fwd, Rev, AD8302 Vmag, Vphs).        |
 | `safety`      | 1 ms                 | Watches Fwd power; on RF detect during motion → emergency stop + K3. |
-| `net`         | event-driven         | lwIP stack; WebSocket frames in/out; telemetry diffing.              |
+| `net`         | event-driven         | QNEthernet (lwIP) or NativeEthernet; line-JSON TCP :8089, HTTP :80; telemetry diffing. |
 
 Telemetry diffing matches the LP-100A-Server pattern: a `Snapshot` struct
 holds the last-sent state; a 30 Hz timer emits `telemetry` frames only when
@@ -363,7 +400,7 @@ Both produce identical operational behaviour on the wire — they just
 have different libraries underneath. The choice is the operator's, and
 it can be revisited without source-code changes.
 
-#### 5.1.3 HAL backend strategy (sim today, drivers next)
+#### 5.1.3 HAL backend strategy (sim for tests, drivers on the carrier)
 
 The same `hal/` directory holds two parallel sets of backend
 implementations: a **simulation** backend that compiles on every target
@@ -374,7 +411,7 @@ integration. Application code (`src/app/`) and the protocol layer
 [`hal/hal.h`](../firmware/tuner-controller/src/hal/hal.h) and have no
 knowledge of which backend is wired underneath.
 
-| Namespace        | Sim today (M1b.2 software half)           | Real driver next (M1b.2 hardware half)                |
+| Namespace        | Sim backend (native tests)                | Teensy 4.1 driver (V2.09 carrier)                      |
 |------------------|-------------------------------------------|--------------------------------------------------------|
 | `hal::motor`     | `motor_sim.cpp` — virtual stepper, advances kStepsPerTick toward target each `motor::tick()` (native tests, STM32 placeholder). | **✅ `motor_teensy41.cpp` (2026-09-06)** — three iHSS60 drives (STEP/DIR/EN into their opto inputs) on carrier channels X/Y/Z; pulses generated by **FlexPWM** with reload-IRQ step counting through the shared library [`firmware/lib/flexpwm_stepper/src/flexpwm_stepper.h`](../firmware/lib/flexpwm_stepper/src/flexpwm_stepper.h) (also used by the bench rig); trapezoidal ramp serviced from `tick()`; drives held enabled (invariant 3). Timing per the CLAUDE.md hardware contract: DIR ≥ 6 µs setup / ≥ 5 µs hold, ≥ 2.5 µs per pulse level, `dsb` after the flag clear in the reload ISR (bench findings in PROPOSAL.md). |
 | `hal::encoder`   | `encoder_sim.cpp` — couples count to motor position 1:1. | **Not fitted with the iHSS60** — its encoder is internal and not readable. The interface returns the FlexPWM step counter; drive fault / arrival come from a `hal::drive_feedback` reading the ALM and PED opto inputs ([HW-T41-PINMAP.md](HW-T41-PINMAP.md) §2.2). External QEI (Teensy XBAR + TMR; STM32 TIM encoder mode) stays available behind the same interface for a non-integrated motor. |
@@ -406,7 +443,8 @@ The portability rule still holds: real driver files live under their
 own `#ifdef TARGET_*` block, and the STM32H743 fallback at Phase 2 is
 a parallel `motor_stm32h7.cpp` etc. — no application changes required.
 
-**End-to-end against the sim today:**
+**End-to-end path** (drawn when every backend was sim; the path is the
+same with the Teensy drivers):
 
 ```
 browser ── /ws WS frame ──► master/hub ──► forwarding handler
@@ -435,16 +473,25 @@ browser ── /ws WS frame ──► master/hub ──► forwarding handler
                           hub fan-out ──► every connected browser
 ```
 
-### 5.2 Encoder strategy (incremental default, absolute optional)
+### 5.2 Position truth (anchored pulse counter; external encoders optional)
 
-The position-feedback contract from [`../CLAUDE.md`](../CLAUDE.md)
-invariant #3 — *encoders are the position truth, anchored to a known
-reference* — is satisfied by **either** an incremental quadrature
-encoder + anchor strategy **or** an absolute encoder. The HAL exposes
-the same `encoder::l_count() / c_count()` interface in both cases;
-application code never knows which is wired underneath.
+[`../CLAUDE.md`](../CLAUDE.md) invariant #3 — *position truth is
+anchored to a known reference, never a bare pulse count* — is met in the
+production build by the **controller's pulse counter**. The JMC iHSS60
+closes its position loop inside the drive and exposes only ALM (fault)
+and PED (arrived), so the count kept in the FlexPWM reload ISR equals
+the shaft position while ALM is clear and PED confirms each move. There
+is no rear shaft for an external encoder. The anchoring rules in §5.2.2
+and the safety stack in §5.2.5 apply to that counter.
 
-#### 5.2.1 Why incremental is the default
+§5.2.1, §5.2.3 and §5.2.4 cover the **Phase-2 fallback**: a
+non-integrated motor with an external incremental or absolute encoder,
+whose count then replaces the pulse counter under the same anchoring
+rules. The HAL exposes one `hal::encoder::count(axis)` interface in
+every case (with the iHSS60 it returns the step counter), so application
+code never knows which is wired underneath.
+
+#### 5.2.1 Why incremental over absolute (external-encoder fallback)
 
 - **Cost:** a 2000 CPR optical quadrature encoder runs $20–$50; a
   comparable single-turn absolute SSI encoder is $150–$300, multi-turn
@@ -461,27 +508,37 @@ application code never knows which is wired underneath.
   MFJ-998, SteppIR, Palstar) uses incremental quadrature with homing
   on boot.
 
-#### 5.2.2 Anchoring an incremental count
+#### 5.2.2 Anchoring the count
 
-An incremental encoder's count is meaningful only relative to a
-reference. The controller establishes the reference one of three ways,
+The pulse counter, like an incremental encoder's count, is meaningful
+only relative to a reference. The controller establishes the reference one of three ways,
 in priority order:
 
 1. **NVRAM persistence (warm-boot fast path).** On every clean move
-   completion, write `(l_steps, c_steps, l_enc, c_enc, side, bypass=true,
-   gen++)` to a small NVRAM region (Teensy 4.1: on-board EEPROM or
-   QSPI flash sector; STM32H743: option byte area or external FRAM).
-   On boot, read the record. If `bypass=true` at last write and the
-   record CRCs clean, **trust the persisted count** — set the encoder
-   counter to `l_enc/c_enc` and the step counter to match. Boot to
-   operational state in under a second. This is the expected path 99 %
-   of the time.
+   completion, write each bound axis's step position (plus its encoder
+   count, if one is fitted) with a "move in flight" dirty flag to a
+   small NVRAM region (Teensy 4.1: emulated EEPROM, layout owned by
+   `app/config.cpp`; STM32H743: option byte area or external FRAM). The
+   flag is written when a move starts and cleared when it completes;
+   there is no bypass field. On boot, every axis gets its stored count
+   back; an axis whose flag is clear keeps its anchor and is operational
+   in under a second, while an axis whose flag is set keeps the count as
+   a best estimate but loses its anchor. The record assumes the shaft did not move
+   while unpowered, and a direct-coupled vacuum capacitor can be
+   back-driven by its bellows — so after a cold start the record **must
+   be confirmed against the lead-screw home switch** (or an absolute
+   sensor, if fitted) before a memory recall on that axis, and the
+   drives stay enabled whenever the controller is powered (invariant 3;
+   [`HARDWARE.md`](HARDWARE.md) "Memory reliability with direct
+   coupling").
 
-2. **Homing (cold-boot fallback).** If NVRAM is invalid, corrupt, or
-   indicates the last shutdown was unclean (`bypass=false` at last
-   write, or motors mid-move), drive each axis slowly toward its
-   mechanical home stop. End detection is:
-   - **Mechanical limit switch** — per-axis opto-isolated input on the
+2. **Homing (cold-boot fallback).** If NVRAM is invalid or corrupt, or
+   an axis's record carries the move-in-flight flag, drive that axis
+   slowly toward its
+   lead-screw home switch, always from the same direction so belt / nut
+   backlash cannot shift the reference. End detection is:
+   - **Lead-screw limit switch** — the axis's home and max switches, NC
+     in series into one opto-isolated input on the
      V2.09 carrier (X→pin 20, Y→pin 21, Z→pin 22; see
      [docs/HW-T41-PINMAP.md](HW-T41-PINMAP.md) §2). The iHSS60 integrated
      drive has no sensorless-homing output (its ALM is a fault flag, not
@@ -490,21 +547,23 @@ in priority order:
    At the detected switch transition, zero the encoder counter (if
    fitted) and the step counter. Then move to the persisted target if
    any, else stay at home. Cost: ~30 – 60 s per axis at safe speed.
+   *(The routine lands with the lead-screw mechanism; until then the
+   operator declares home again with `set_home`.)*
 
-3. **Optional: index pulse (Z phase).** Encoders with an index output
+3. **Optional, external encoder only: index pulse (Z phase).** Encoders with an index output
    produce one pulse per shaft revolution at a fixed mechanical angle.
    The controller uses this only as a *crosscheck* in normal operation
    (flag drift if an index pulse arrives at an unexpected count), and
    as a fast re-anchor after a partial-blind homing — drive past one
    revolution beyond the stop, capture the Z transition, and you have
-   sub-degree absolute reference inside the post-gearbox shaft.
+   sub-degree absolute reference on the element shaft.
 
    Index support is **encoder-dependent**. The HAL exposes a
    `hal::encoder::index_seen(axis)` query; if the encoder has no Z
    phase it returns false forever, and the controller falls back to
    the limit-switch homing in (2).
 
-#### 5.2.3 What changes if you choose absolute SSI
+#### 5.2.3 What changes if you choose absolute SSI (external-encoder fallback)
 
 If the L axis has a long, slow mechanical travel where homing 30–60 s
 on every cold boot is intolerable, swap the L encoder for an absolute
@@ -518,8 +577,8 @@ SSI unit. Concrete changes:
   for that axis — the encoder reports its real position immediately,
   every boot. NVRAM persistence is still useful as a sanity check
   (detect ±N count drift from last shutdown).
-- **No protocol changes.** The wire format already treats `l_enc` as
-  an `int32` — same field for either encoder kind.
+- **No protocol changes.** The wire format already carries a per-axis
+  `enc` as an `int32` — same field for either encoder kind.
 - **No application-logic changes.** The tuning algorithm, the memory
   schema, and the GUI never see the difference.
 
@@ -527,7 +586,7 @@ The decision is **per-axis** and reversible — both implementations live
 in the codebase, and the choice is a build-flag (or even a runtime
 config knob if the hardware variants share connector pinout).
 
-#### 5.2.4 Drift detection (applies to both encoder kinds)
+#### 5.2.4 Drift detection (external encoder only)
 
 On every move completion, the controller compares the *step delta*
 (commanded microsteps) with the *encoder delta* over the same window.
@@ -555,11 +614,11 @@ concentric envelopes, not by trusting any single mechanism. Listed
 outermost to innermost, all are enforced from M1b.2 onward unless
 noted:
 
-1. **Drive currents and following-error limit set for the geared
-   load** (M1b.2 commissioning step, via JMC's HISU tool: P8 open-loop
+1. **Drive currents and following-error limit set for the
+   direct-coupled load** (M1b.2 commissioning step, via JMC's HISU tool: P8 open-loop
    current, P9 closed-loop current, P16 position-error limit). The
    drive alarms before it can build enough torque to break the
-   gearbox or the cap.
+   element or its coupling.
 
 2. **No motion under RF** (invariant 1) — eliminates the highest-risk
    EMI-induced step-loss window (TX keyed, driver opto under noise)
@@ -579,29 +638,43 @@ noted:
    sit inside the limit switches, which sit inside the mechanical
    stops — three concentric envelopes.
 
-5. **Per-axis mechanical limit switch** on the V2.09 carrier opto
-   inputs (X→20, Y→21, Z→22 — see
-   [docs/HW-T41-PINMAP.md](HW-T41-PINMAP.md) §2). Hit inside the
-   cap's own mechanical hard stop, latched in firmware, the move
-   halts immediately. This is the only hardware fallback the
-   firmware has against a runaway pulse train if the soft limit is
-   wrong (mis-calibration) or the step counter has drifted past it
-   undetected.
+5. **Per-axis home and max limit switches** beside the axis's
+   belt-driven lead screw, NC in series into one V2.09 carrier opto
+   input (X→20, Y→21, Z→22 — see
+   [docs/HW-T41-PINMAP.md](HW-T41-PINMAP.md) §2). Set inside the
+   element's own mechanical stops and latched by travel direction, a
+   trip cuts pulses immediately (no ramp). This is the only hardware
+   fallback the firmware has against a runaway pulse train if the soft
+   limit is wrong (mis-calibration) or the step counter has drifted
+   past it undetected. Because the switches ride a lead screw rather
+   than the element, invariant 7 adds a homing travel watchdog, a
+   home→max span check on every full home, and a bounded pull-off when a
+   switch is active at power-up — risk register in
+   [`HARDWARE.md`](HARDWARE.md). *(The inputs are read and reported
+   today; the latched trip handling lands with the mechanism, PLAN.md
+   M1b.2.)*
 
-6. **Drive feedback — ALM and PED** (per-axis opto outputs of the
-   iHSS60 into carrier opto inputs, wiring and open final-build
-   checks in [HW-T41-PINMAP.md](HW-T41-PINMAP.md) §2.2). An ALM trip
-   (following error beyond P16, over-current, over-voltage) halts the
-   axis, latches `homed:false`, and emits `status:warn drive_alarm`;
-   fail-safe polarity P10 = 1 makes a broken cable read as a fault.
-   PED must assert after every bounded move before the position is
-   persisted, else `status:warn stall`. This replaces the rear-shaft
-   encoder reconciliation for integrated drives; §5.2.4 still applies
-   if an external encoder is fitted to a non-integrated motor.
+6. **Drive feedback — PED and ALM** (implemented 2026-09-13, opt-in
+   per signal until wired; wiring in
+   [HW-T41-PINMAP.md](HW-T41-PINMAP.md) §2.2, operator guide in
+   [DRIVE-FEEDBACK.md](DRIVE-FEEDBACK.md)). **PED** per motor: a
+   finished move is saved as a clean anchor only after the drive reports
+   arrival within 2 s, otherwise that element's home is cleared
+   (`drive_fault` `no_arrival`); PED lost at rest clears home
+   (`drive_lost`) and refuses motion (`drive_not_ready`). **ALM** of all
+   drives in parallel: an alarm (following error beyond P16,
+   over-current, over-voltage) cuts pulses on every axis at once, clears
+   home on every bound element when held, and refuses motion
+   (`drive_alarm`). With the drive defaults, PED (P14 = 1) reveals a
+   loss of motor power and ALM (P10 = 0) does not; P10 = 1 would make a
+   broken ALM cable read as a fault but needs the HISU tool and series
+   wiring. This replaces the rear-shaft encoder reconciliation for
+   integrated drives; §5.2.4 still applies if an external encoder is
+   fitted to a non-integrated motor.
 
 The first install-time commissioning **must map each limit-switch
-position to a safe number of steps inside the cap's mechanical
-stop, both ends**. That mapping is per-build and not derivable from
+position to a safe number of steps inside the element's
+mechanical stop, both ends**. That mapping is per-build and not derivable from
 the schematic — it is an M1b.2 calibration step recorded in NVRAM
 alongside the rest of the per-axis configuration. The soft-limit
 constants (`home_low`, `home_high`, `SAFE_MARGIN`) live with the
@@ -616,7 +689,7 @@ LP-100A-Server:
 |--------------------|----------|------------------------------------------------------------------------------------------------|
 | `tuner-client`     | **✅ M1b.1** | Maintains the TCP line-JSON connection to the tuner controller. Auto-reconnect with 1 s → 30 s backoff. Decodes inbound frames; `Send(Command)` for outbound verbs. |
 | `cat-poller`       | M3       | Polls the transceiver for QRG every `cat.poll_ms` (default 200 ms). Emits `qrg` events.       |
-| `encoder-reader`   | M3       | Reads the two ANO encoders via GPIO; debounces; emits nudge/save events.                       |
+| `encoder-reader`   | M3       | Reads one ANO encoder per element axis (2 or 3) via GPIO; debounces; emits nudge/save events.                       |
 | `hub`              | **✅ M1a + M1b.2** | WS server at `/ws` for the embedded web UI; fans out unified state to all browser/touch clients. Browser commands are forwarded to the controller via `tunerclient.Send()` through the `forwardingHandler` constructed in `main.go`. |
 
 Plus the embedded HTTP server (`/`, `/ws`, `/healthz`, `/api/config`,
@@ -633,7 +706,7 @@ pill would stay red.
 
 ```
    ┌── Pi GPIO ──┐    ┌── USB ───────────┐   ┌── Ethernet ──────┐
-   │  ANO enc ×2 │    │  CAT (CI-V/etc.) │   │  Tuner controller │
+   │  ANO ×2–3   │    │  CAT (CI-V/etc.) │   │  Tuner controller │
    └──────┬──────┘    └────────┬─────────┘   └────────┬─────────┘
           │ events             │ qrg                  │ telemetry + state
           ▼                    ▼                      ▼
@@ -657,39 +730,43 @@ pill would stay red.
 
 ```sql
 CREATE TABLE slot (
+  topology     TEXT    NOT NULL CHECK(topology IN ('balanced_l','balanced_pi')),
   band         TEXT    NOT NULL,    -- '160m', '80m', ..., '6m'
   freq_hz      INTEGER NOT NULL,    -- centre of bucket
   bucket_hz    INTEGER NOT NULL,    -- 25_000 / 50_000 / 100_000
-  l_steps      INTEGER NOT NULL,
-  c_steps      INTEGER NOT NULL,
-  side         TEXT    NOT NULL CHECK(side IN ('hi_z','lo_z')),
+  positions    TEXT    NOT NULL,    -- JSON, one entry per element: [{"name":"L","steps":18432}, ...]
+  side         TEXT    CHECK(side IN ('hi_z','lo_z')),   -- Balanced L only; NULL on Balanced Pi
   swr_at_save  REAL    NOT NULL,
   saved_at     TEXT    NOT NULL,    -- ISO8601
   label        TEXT,
-  PRIMARY KEY (band, freq_hz)
+  PRIMARY KEY (topology, band, freq_hz)
 );
 
-CREATE INDEX slot_band_freq ON slot(band, freq_hz);
+CREATE INDEX slot_band_freq ON slot(topology, band, freq_hz);
 ```
 
-Recall picks the slot whose `freq_hz` is nearest to the rig's reported QRG
-within the same band; if none within `2·bucket_hz`, fall back to band
-default; if no default, fall to auto-tune.
+Recall picks the slot of the declared topology whose `freq_hz` is
+nearest to the rig's reported QRG within the same band; if none within
+`2·bucket_hz`, fall back to band default; if no default, fall to
+auto-tune (Balanced L) or to the operator (Balanced Pi in Phase 1).
+Slots never cross topologies. The `memory` frame carries the same shape
+([`PROTOCOL.md`](PROTOCOL.md) §2.3).
 
 ### 5.5 Web UI (embedded in master binary)
 
 Plain HTML/JS, served from `go:embed`, no SPA framework. Three views:
 
 - **Operate** (default): big SWR meter, |Z|/∠Z readout, current band/QRG,
-  current memory slot, L/C bar gauges, "Tune", "Save", "Bypass" buttons,
+  current memory slot, one bar gauge per element, "Tune", "Save", "Bypass" buttons,
   and a connection-state pill. Mirrors the *intent* of the Alpha RF tuner
   GUI (clear primary readouts + one-touch tune) without copying its
   T-network controls.
 - **Memory**: tabular view of all saved slots per band, with `swr_at_save`,
   last-tuned timestamp, delete/edit.
 - **Setup**: log-level picker (like LP-100A-Server), CAT-rig selector,
-  tuner-controller IP, encoder calibration helpers, optional LP-100A-Server
-  URL for second-opinion telemetry.
+  tuner-controller IP, topology and element→motor map (`set_topology`),
+  encoder calibration helpers, optional LP-100A-Server URL for
+  second-opinion telemetry.
 
 The Adafruit ANO encoders drive the *same* state the web UI mutates; both
 are equal first-class inputs.
@@ -705,25 +782,30 @@ the CAT poller and SQLite memory store.
 
 | Failure                                  | Behavior                                                                                  |
 |------------------------------------------|-------------------------------------------------------------------------------------------|
-| Tuner controller WS drops                | Master shows red pill, reconnects 1 s → 30 s. Operator sees stale state with timestamp.   |
+| Tuner controller link drops              | Master shows red pill, reconnects 1 s → 30 s. Operator sees stale state with timestamp.   |
 | RF detected during commanded motion      | Controller halts steppers within 1 ms, latches K3 bypass, emits `status:warn`. Master shows lockout banner; recall/auto-tune disabled until Fwd ≤ threshold for 3 s. |
-| Encoder count diverges from step counter | Controller treats encoder as truth (§5.2.4), re-syncs step counter, emits `status:info enc_resync`. ≥3 events in 10 min → `status:warn`. |
-| Stepper stall detected                   | The iHSS60's ALM output flags a following-error trip (§5.2.5 layer 6): controller halts the axis, latches `homed:false`, emits `status:warn drive_alarm`. A bounded move whose pulse train ends without PED asserting is reported as `status:warn stall`. Stalls that stay inside the drive's P16 window are caught only at the limit switch (layer 5) or when the operator notices SWR diverging from the saved memory. |
-| Limit switch hit outside homing          | A move ran into the mechanical limit switch (§5.2.5 layer 5). Controller halts the axis immediately, latches the axis as `homed:false`, emits `status:warn limit_hit`. Operator runs `home` and investigates — soft limit was wrong or step counter drifted. |
-| Cold boot with unclean NVRAM             | Controller refuses motion verbs except `home`; emits `status:warn` and runs auto-home on next `home` command. `homed:false` in state until complete (§5.2.2). |
+| Encoder count diverges from step counter | (External encoder only.) Controller treats encoder as truth (§5.2.4), re-syncs step counter, emits `status:info enc_resync`. ≥3 events in 10 min → `status:warn`. |
+| Stepper stall or drive fault             | With drive feedback enabled (§5.2.5 layer 6): a move without PED arrival within 2 s clears that element's home (`no_arrival`); an ALM trip cuts pulses on every axis and clears home on every bound element (`alarm`); motion is refused with `drive_alarm` / `drive_not_ready` until the fault clears, and a `drive_fault` stays until home is declared again. Stalls inside the drive's P16 window are caught only at the limit switch (layer 5) or when the operator notices SWR diverging from the saved memory. |
+| Limit switch hit outside homing          | *Planned — lands with the lead-screw mechanism (PLAN.md M1b.2). Today the limit input is only read and reported, so a trip does not stop motion; the software travel window is the only limit.* Once implemented: a move runs into a lead-screw limit switch (§5.2.5 layer 5), the controller cuts pulses on the axis immediately, latches it as `homed:false` and emits `status:warn limit_hit`. The operator re-homes and investigates — soft limit wrong or step counter drifted. |
+| Cold boot with unclean NVRAM             | An axis whose record carries the move-in-flight flag keeps its count as a best estimate but loses its anchor, so `homed:false`. Motion verbs on it are refused `not_anchored` (bounded setup moves in bypass excepted) until home is declared again — by the limit-switch homing routine once the mechanism lands, by `set_home` today (§5.2.2). |
 | Cold boot with absolute encoder mismatch | (If absolute SSI used) controller compares the SSI reading against the last persisted count; >0.5 % drift emits `status:warn` and forces a homing crosscheck. |
-| K1+K2 both reading closed                | Hardware fault. Controller drops K1+K2, latches K3, refuses motion, emits `status:error relay_fault`.|
+| K1+K2 both reading closed (Balanced L)   | Hardware fault. Controller drops K1+K2, latches K3, refuses motion, emits `status:error relay_fault`.|
 | CAT link drops                           | Master continues with last-known QRG, badges it stale after 5 s. Auto-recall disabled.   |
 | LP-100A second-opinion disagrees         | Cosmetic warning only; tuner's own measurement remains authoritative for control.        |
-| Pi loses power mid-tune                  | Controller times out client cmds after 10 s with no heartbeat → halts motion, K3 bypass. NVRAM marked `bypass=true` only after the halt completes, so next boot homes rather than trusting stale persisted position. |
+| Pi loses power mid-tune                  | *Planned:* the controller times out client commands after 10 s without a heartbeat → halts motion, engages K3 bypass. Not implemented today — a move already commanded runs to its target. In either case a position becomes a clean anchor only once its move has finished (flag cleared), so a controller power loss mid-move forces re-homing rather than trusting a stale count. |
 
 ## 7. Out of scope (intentionally)
 
 These exclusions are part of the architecture and should be enforced in
 code review:
 
-- **T-network or pi-network tuning** — separate project.
-- **Balanced-tuner topology** — the balun is the boundary.
+- **Unbalanced L / T / Pi networks with an output balun** — the 2026-05
+  design, superseded 2026-09-05 by the balanced networks; T-Match is not
+  supported.
+- **Balanced Pi auto-tune in Phase 1** — the topology is driven and
+  recalled, but its search algorithm is a Phase-2 deliverable.
+- **Tuning without a balun** — the transceiver-side 1:1 current balun is
+  part of the architecture.
 - **Hot-switching the L or C** under RF — interlocked in firmware and GUI.
 - **Cloud relay / WAN access** — LAN + VPN if needed.
 - **Long-term match logging / charting** — a separate WS subscriber.
