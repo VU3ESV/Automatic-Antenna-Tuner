@@ -65,7 +65,7 @@ master: measure SWR
 | Step                              | Reason                                                                                              |
 |-----------------------------------|-----------------------------------------------------------------------------------------------------|
 | `set_bypass true` first           | Invariant #2 (bypass on power-up) extended: bypass is the *only* safe configuration during reconfig. |
-| Measure in bypass                 | The bypass topology presents the *load impedance through the balun* at the tuner port — exactly the Z the L-network has to match. With the L-network engaged, you'd measure the network's output, not its input. |
+| Measure in bypass                 | In bypass the coupler, on the 50 Ω side ahead of the balun, reads the ladder-line impedance through the balun and the K3 path — the Z the network has to match, once that path is de-embedded ([`RF-DESIGN.md`](RF-DESIGN.md) §3). With the network engaged it reads the match instead. |
 | `set_side` before any motion      | K1/K2 are mutually exclusive (`relay_fault` if both close). The verb itself refuses under RF. |
 | Move L and C in parallel          | Both axes can travel without interaction — they're mechanically independent. Halves wall-clock tune time. |
 | Re-key after move to verify SWR   | The analytic / heuristic solution assumes lossless components; real losses + parasitic C show up at engagement. The verification is also what catches "the operator changed bands while we were moving." |

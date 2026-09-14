@@ -245,10 +245,9 @@ tier-1 input bank constrains how many axes the carrier can host
 directly:
 
 - **2 axes:** fits — A=30, B=34, index=35 on axis 1; A=36, B=41 on
-  axis 2 (no index). Costs the `MOTOR_FAULT` aggregate input (pin
-  36) and the I²C-strobe option (pin 41). Motor-fault aggregation
-  can be re-implemented as an external OR / wired-OR feeding a
-  spare opto input.
+  axis 2 (no index). Uses pin 36 — spare since the motor-fault
+  aggregate moved to ALM on pin 29 (§2.2) — and gives up the
+  I²C-strobe option (pin 41).
 - **3 axes** (a Balanced Pi with per-axis encoders): **does not fit**
   on the tier-1 bank — short by at least one A/B pair. Pick one:
 

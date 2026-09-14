@@ -372,7 +372,8 @@ These are written incrementally as the build proceeds:
   |Z| against `[10, 25, 50, 100, 250, 1000] Ω` resistive loads;
   AD8302 ∠Z against `[50−j100, 50−j50, 50, 50+j50, 50+j100]`
   reactive loads; path-length residual against a precision 50 Ω
-  load. The closed-form decode and the sanity gates that consume
+  load; balun / bypass-path de-embedding against known balanced loads
+  at the ladder-line port. The closed-form decode and the sanity gates that consume
   these cal values live in [`RF-DESIGN.md`](RF-DESIGN.md) §4.6 and
   §4.10 respectively.
 - **§7 RF immunity practices in this enclosure** — *M2 / M5*. Cross-

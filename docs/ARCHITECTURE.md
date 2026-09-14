@@ -518,10 +518,12 @@ in priority order:
    completion, write each bound axis's step position (plus its encoder
    count, if one is fitted) with a "move in flight" dirty flag to a
    small NVRAM region (Teensy 4.1: emulated EEPROM, layout owned by
-   `app/config.cpp`; STM32H743: option byte area or external FRAM). On
-   boot, read the record; if the last shutdown was clean (bypass
-   engaged, no move in flight), restore the counts and reach operational
-   state in under a second. The record assumes the shaft did not move
+   `app/config.cpp`; STM32H743: option byte area or external FRAM). The
+   flag is written when a move starts and cleared when it completes;
+   there is no bypass field. On boot, every axis gets its stored count
+   back; an axis whose flag is clear keeps its anchor and is operational
+   in under a second, while an axis whose flag is set keeps the count as
+   a best estimate but loses its anchor. The record assumes the shaft did not move
    while unpowered, and a direct-coupled vacuum capacitor can be
    back-driven by its bellows — so after a cold start the record **must
    be confirmed against the lead-screw home switch** (or an absolute
@@ -530,9 +532,9 @@ in priority order:
    [`HARDWARE.md`](HARDWARE.md) "Memory reliability with direct
    coupling").
 
-2. **Homing (cold-boot fallback).** If NVRAM is invalid, corrupt, or
-   indicates the last shutdown was unclean (`bypass=false` at last
-   write, or motors mid-move), drive each axis slowly toward its
+2. **Homing (cold-boot fallback).** If NVRAM is invalid or corrupt, or
+   an axis's record carries the move-in-flight flag, drive that axis
+   slowly toward its
    lead-screw home switch, always from the same direction so belt / nut
    backlash cannot shift the reference. End detection is:
    - **Lead-screw limit switch** — the axis's home and max switches, NC
@@ -545,6 +547,8 @@ in priority order:
    At the detected switch transition, zero the encoder counter (if
    fitted) and the step counter. Then move to the persisted target if
    any, else stay at home. Cost: ~30 – 60 s per axis at safe speed.
+   *(The routine lands with the lead-screw mechanism; until then the
+   operator declares home again with `set_home`.)*
 
 3. **Optional, external encoder only: index pulse (Z phase).** Encoders with an index output
    produce one pulse per shaft revolution at a fixed mechanical angle.
@@ -782,13 +786,13 @@ the CAT poller and SQLite memory store.
 | RF detected during commanded motion      | Controller halts steppers within 1 ms, latches K3 bypass, emits `status:warn`. Master shows lockout banner; recall/auto-tune disabled until Fwd ≤ threshold for 3 s. |
 | Encoder count diverges from step counter | (External encoder only.) Controller treats encoder as truth (§5.2.4), re-syncs step counter, emits `status:info enc_resync`. ≥3 events in 10 min → `status:warn`. |
 | Stepper stall or drive fault             | With drive feedback enabled (§5.2.5 layer 6): a move without PED arrival within 2 s clears that element's home (`no_arrival`); an ALM trip cuts pulses on every axis and clears home on every bound element (`alarm`); motion is refused with `drive_alarm` / `drive_not_ready` until the fault clears, and a `drive_fault` stays until home is declared again. Stalls inside the drive's P16 window are caught only at the limit switch (layer 5) or when the operator notices SWR diverging from the saved memory. |
-| Limit switch hit outside homing          | A move ran into a lead-screw limit switch (§5.2.5 layer 5). Controller halts the axis immediately, latches the axis as `homed:false`, emits `status:warn limit_hit`. Operator runs `home` and investigates — soft limit was wrong or step counter drifted. |
-| Cold boot with unclean NVRAM             | Controller refuses motion verbs except `home`; emits `status:warn` and runs auto-home on next `home` command. `homed:false` in state until complete (§5.2.2). |
+| Limit switch hit outside homing          | *Planned — lands with the lead-screw mechanism (PLAN.md M1b.2). Today the limit input is only read and reported, so a trip does not stop motion; the software travel window is the only limit.* Once implemented: a move runs into a lead-screw limit switch (§5.2.5 layer 5), the controller cuts pulses on the axis immediately, latches it as `homed:false` and emits `status:warn limit_hit`. The operator re-homes and investigates — soft limit wrong or step counter drifted. |
+| Cold boot with unclean NVRAM             | An axis whose record carries the move-in-flight flag keeps its count as a best estimate but loses its anchor, so `homed:false`. Motion verbs on it are refused `not_anchored` (bounded setup moves in bypass excepted) until home is declared again — by the limit-switch homing routine once the mechanism lands, by `set_home` today (§5.2.2). |
 | Cold boot with absolute encoder mismatch | (If absolute SSI used) controller compares the SSI reading against the last persisted count; >0.5 % drift emits `status:warn` and forces a homing crosscheck. |
 | K1+K2 both reading closed (Balanced L)   | Hardware fault. Controller drops K1+K2, latches K3, refuses motion, emits `status:error relay_fault`.|
 | CAT link drops                           | Master continues with last-known QRG, badges it stale after 5 s. Auto-recall disabled.   |
 | LP-100A second-opinion disagrees         | Cosmetic warning only; tuner's own measurement remains authoritative for control.        |
-| Pi loses power mid-tune                  | Controller times out client cmds after 10 s with no heartbeat → halts motion, K3 bypass. NVRAM marked `bypass=true` only after the halt completes, so next boot homes rather than trusting stale persisted position. |
+| Pi loses power mid-tune                  | *Planned:* the controller times out client commands after 10 s without a heartbeat → halts motion, engages K3 bypass. Not implemented today — a move already commanded runs to its target. In either case a position becomes a clean anchor only once its move has finished (flag cleared), so a controller power loss mid-move forces re-homing rather than trusting a stale count. |
 
 ## 7. Out of scope (intentionally)
 

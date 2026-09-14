@@ -89,8 +89,17 @@ Per-band L and C target ranges live in [`TUNING.md`](TUNING.md) §2.
 The auto-tune algorithm
 ([`TUNING.md`](TUNING.md) Proposal B and the analytic-seed path of
 Proposal D) needs to compute `(L_target, C_target, side)` from a
-measured load impedance `Z_load = R + jX` looking into the tuner
-output port with bypass engaged. Source impedance is `R_s = 50 Ω`.
+measured load impedance `Z_load = R + jX` with bypass engaged. Source
+impedance is `R_s = 50 Ω`.
+
+**Reference plane.** The coupler and V / I taps sit on the 50 Ω side
+ahead of the balun (§4.2), so in bypass they read the ladder-line
+impedance *through* the 1:1 balun and the K3 bypass path, not at the
+network's output terminals where the match is made. That path adds a
+small series impedance and phase shift that grows with frequency. The
+solver must use the reading de-embedded to the network output (§4.9
+step 5); without it the seed is off, most on 10 m and 6 m. The
+hill-climb absorbs what remains.
 For the Balanced L, `L` below is the total series inductance of the
 synchronized pair (§1).
 
@@ -453,6 +462,12 @@ this section is the *what* and *why*.
 4. **Path-length residual** — with a pure 50 Ω load, V_phs should
    read 0° at every frequency. Any residual is V↔I path-length
    error; store as a per-band phase offset added to every reading.
+5. **Balun + bypass-path de-embedding** — with bypass engaged,
+   terminate the ladder-line port in known balanced loads (resistive,
+   e.g. 50 / 200 / 600 Ω, plus a ±jX pair) at each band and fit a
+   per-band correction from the coupler reference plane to the
+   network's output terminals, so §3 solves against the load the
+   network actually sees.
 
 Calibration is stored in TOML on the master and pushed to the
 controller on connect (per [`../CLAUDE.md`](../CLAUDE.md) "Config").
