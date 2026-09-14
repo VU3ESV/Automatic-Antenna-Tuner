@@ -250,29 +250,30 @@ For most M0–M2 work `Serial.print` debugging + the on-board LEDs +
 test fixtures are enough. SWD becomes important when chasing motor-ISR
 timing or lwIP stalls.
 
-### 3.5 Project skeleton (created at M0)
+### 3.5 Project layout
 
 ```
-firmware/tuner-controller/
-├── platformio.ini
-├── include/                    # shared headers
-├── src/
-│   ├── main.cpp                # task setup, super-loop
-│   ├── app/                    # MCU-agnostic logic (telemetry diff, state, protocol)
-│   │   ├── state.{h,cpp}
-│   │   ├── protocol.{h,cpp}
-│   │   └── tuning.{h,cpp}
-│   └── hal/                    # one file per peripheral, target-gated
-│       ├── motor_teensy41.cpp
-│       ├── motor_stm32h7.cpp
-│       ├── encoder_teensy41.cpp
-│       ├── encoder_stm32h7.cpp
-│       ├── adc_teensy41.cpp
-│       ├── adc_stm32h7.cpp
-│       ├── relay.{h,cpp}        # GPIO-only; one file fits both
-│       └── net_lwip.{h,cpp}     # lwIP is portable; PHY init is target-gated
-└── test/
-    └── test_state_native/      # runs on PC via env:native
+firmware/
+├── lib/                          # shared PlatformIO libraries
+│   ├── net_hal/                  # QNEthernet / NativeEthernet abstraction
+│   ├── flexpwm_stepper/          # FlexPWM step generation + ISR step counting
+│   └── flasherx/                 # vendored flash layer for firmware update over Ethernet
+├── test/                         # standalone bench / bring-up projects
+└── tuner-controller/
+    ├── platformio.ini
+    ├── include/                  # shared headers
+    ├── tools/                    # build_info.py, fnet_dhcp_hostname.py, ota_upload.py
+    ├── src/
+    │   ├── main.cpp              # setup, super-loop
+    │   ├── tuner_server.cpp      # master link (line-JSON over TCP, port 8089)
+    │   ├── http_server.cpp       # bring-up page + firmware update (port 80)
+    │   ├── app/                  # MCU-agnostic: config, motion, ota, protocol, settings, state
+    │   └── hal/                  # hal.h + one file per peripheral, target-gated
+    │       ├── *_teensy41.cpp    # motor, relay, limits, feedback, nvs, sdcard, firmware, led
+    │       ├── *_sim.cpp         # simulation backends for the native tests
+    │       ├── led_stm32h7.cpp   # STM32H743 placeholder
+    │       └── board/t41_v209.{h,cpp}   # V2.09 carrier pin map
+    └── test/                     # native unit tests (config, feedback, motion, ota, settings, state)
 ```
 
 `#ifdef TARGET_TEENSY41` / `#ifdef TARGET_STM32H743` macros come from

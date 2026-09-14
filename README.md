@@ -1,21 +1,29 @@
 # Automatic Antenna Tuner
 
-An automatic L-network antenna tuner for a **Doublet on 460/600 Ω
-open-wire ladder line, 160 m – 6 m**. Two controllers:
+An automatic **balanced** antenna tuner for a **Doublet on 460/600 Ω
+open-wire ladder line, 160 m – 6 m** — a **Balanced L-Network** by
+default or a **Balanced Pi-Network**, fed through a fixed 1:1 current
+balun on the transceiver side. Two controllers:
 
-- A **tuner controller** at the tuner enclosure — Teensy 4.1 driving two
-  stepper motors (roller inductor + vacuum-variable cap), reading two
-  quadrature encoders, switching three vacuum relays (Hi-Z / Lo-Z / bypass),
-  and sampling an AD8302 + dual AD8307 detector chain for SWR, R, X.
+- A **tuner controller** at the tuner enclosure — a Teensy 4.1 on the
+  grblHAL-teensy-4.x V2.09 carrier driving two (Balanced L) or three
+  (Balanced Pi) JMC iHSS60 closed-loop steppers coupled directly to the
+  elements (a synchronized roller-inductor pair on one motor, one or two
+  vacuum-variable capacitors), each axis homed by limit switches on a
+  belt-driven lead screw; switching two-pole vacuum relays (Hi-Z / Lo-Z
+  selector on Balanced L, bypass on both); and sampling an AD8302 + dual
+  AD8307 detector chain for SWR, R, X.
 - A **master controller** in the shack — a Raspberry Pi running a Go
-  service with an embedded touchscreen web UI, two Adafruit ANO directional
-  encoders for manual L/C nudges, a CAT link to the transceiver for QRG, and
-  a SQLite memory of optimal (L, C, side) per band/frequency.
+  service with an embedded touchscreen web UI, one Adafruit ANO
+  directional encoder per element axis for manual nudges, a CAT link to
+  the transceiver for QRG, and a SQLite memory of element positions per
+  (topology, band, frequency).
 
-The two controllers talk over Ethernet with a WebSocket JSON protocol,
-following the [LP-100A-Server](https://github.com/VU3ESV/LP-100A-Server)
-pattern: one process owns the hardware, many clients subscribe, named
-verbs only.
+The two controllers talk over Ethernet with a JSON protocol following
+the [LP-100A-Server](https://github.com/VU3ESV/LP-100A-Server) pattern:
+one process owns the hardware, many clients subscribe, named verbs only.
+Browsers reach the master over WebSocket; the master reaches the
+controller over line-framed TCP carrying the same JSON payloads.
 
 ## Documents
 
@@ -31,6 +39,13 @@ verbs only.
 - **[docs/HARDWARE.md](docs/HARDWARE.md)** — BoM, schematics, wiring,
   calibration procedures. Short-form BoM today; long-form fills in
   M1b.2 → M5.
+- **[docs/HW-T41-CARRIER.md](docs/HW-T41-CARRIER.md)** — why the
+  off-the-shelf grblHAL-teensy-4.x V2.09 board is the Phase 1 carrier,
+  and how its stepper channels, inputs and relay drivers map to each
+  topology.
+- **[docs/HW-T41-PINMAP.md](docs/HW-T41-PINMAP.md)** — Teensy 4.1 pin →
+  carrier net reference, including the PED / ALM inputs and the
+  per-topology allocation.
 - **[docs/DRIVE-FEEDBACK.md](docs/DRIVE-FEEDBACK.md)** — iHSS60 PED / ALM
   drive feedback: why it exists, wiring to the V2.09 carrier,
   commissioning, fault recovery, troubleshooting and limits. Off by
@@ -42,10 +57,11 @@ verbs only.
   four candidate algorithms (memory-first / pure analytic / coarse-grid
   / hybrid) with pros + cons, and the chosen project decision (Proposal
   D — hybrid).
-- **[docs/RF-DESIGN.md](docs/RF-DESIGN.md)** — L-network theory, component
-  sizing, detector math. §3 closed-form L-network solution is the math
-  reference for the auto-tune algorithm; §4 (detector chain) and §5
-  (balun) fill in during M2 / M5.
+- **[docs/RF-DESIGN.md](docs/RF-DESIGN.md)** — balanced-network theory,
+  component sizing, detector math. §3 closed-form L-network solution
+  (with `L = 2 × L_leg` for the inductor pair) is the math reference for
+  the auto-tune algorithm; §4 (detector chain) and §5 (balun) fill in
+  during M2 / M5.
 - **[docs/EXTENSIONS.md](docs/EXTENSIONS.md)** — Phase 2 scope: multi-
   antenna (Doublet + HexBeam + …), multi-transceiver, and SO2R
   workflow modelled on the 4O3A TGXL / Antenna Genius family.
@@ -60,27 +76,39 @@ verbs only.
 
 ## Status
 
-**M1b live on the bench (simulated HAL).** End-to-end is up:
+**M1b.2 — production firmware on the real carrier (since 2026-09-06).**
+The tuner controller runs on a Teensy 4.1 in the V2.09 carrier on the
+bench, with real drivers behind the HAL:
 
-- The Go master runs on a Raspberry Pi under systemd, serving the
-  embedded web UI on `:8088`.
-- A Teensy 4.1 dials in over TCP (PROTOCOL.md §1.0) and publishes
-  real `state` + `heartbeat` frames; the master fans them out to
-  every connected browser.
-- The web UI's **Operate** panel sends `move_l` / `move_c` /
-  `set_side` / `set_bypass` / `home` verbs — they hit the controller,
-  drive the simulated stepper / encoder / relay / safety HAL, and the
-  resulting state lands back on every browser within a frame.
-- The RF-lockout path is exercisable from the browser via the debug
-  `set_fwd_w` verb — set it above 5 W and motion verbs come back with
-  `ack ok:false code:rf_lockout`.
+- **Motion:** FlexPWM hardware step generation for up to three iHSS60
+  axes, trapezoidal ramps, per-axis travel windows, and clean-shutdown
+  position anchors in EEPROM (invariant 3). `set_topology` declares
+  Balanced L or Balanced Pi with the element→motor map; `move_axis`,
+  `run`, `stop` and a latched `estop` operate it.
+- **Relays and inputs:** K1 / K2 / K3 on carrier relay outputs, with
+  bypass as the de-energised state latched first at boot; limit-switch
+  inputs reported; **iHSS60 PED / ALM supervision** in firmware since
+  2026-09-13, off until the lines are wired
+  ([docs/DRIVE-FEEDBACK.md](docs/DRIVE-FEEDBACK.md)).
+- **Control surfaces:** the master link (line-JSON over TCP, port 8089)
+  and a browser page on the controller's own HTTP port 80 calling the
+  same verbs — the operating UI until the Pi master is deployed.
+- **Firmware update over Ethernet** (FlasherX,
+  `pio run -e teensy41_native_ota -t upload`); USB remains the
+  first-install and recovery path.
+- **Master:** Go service on the Pi under systemd, embedded web UI on
+  `:8088`, WebSocket fan-out to every browser, auto-reconnect to the
+  controller, Operate panel.
 
-Real TMC2209 drivers, hardware encoders, and vacuum relays plug in
-behind the same HAL interfaces under M1b.2 hardware integration —
-application code does not change. See [docs/PLAN.md](docs/PLAN.md)
-for the milestone-by-milestone state and
-[docs/ARCHITECTURE.md §5.1.3](docs/ARCHITECTURE.md) for the HAL backend
-swap-in path.
+Still simulated or pending: forward power is injected with the debug
+`set_fwd_w` verb until the AD8307 chain lands (M2), so the RF-lockout
+path is exercised but not yet measured; the lead-screw limit mechanism
+and its direction-latched trip handling; vacuum-relay and PED / ALM
+wiring; CAT, ANO encoders and SQLite memory (M3); auto-tune (M4); RF
+commissioning (M5). See [docs/PLAN.md](docs/PLAN.md) for the
+milestone-by-milestone state and
+[docs/ARCHITECTURE.md §5.1.3](docs/ARCHITECTURE.md) for the HAL
+backends.
 
 ## Deploy the master to a Raspberry Pi
 
@@ -196,15 +224,24 @@ Same install.sh + systemd unit; just pass the armv7 binary to
 
 | Layer              | Choice                                                            |
 |--------------------|-------------------------------------------------------------------|
-| Tuner-side MCU     | Teensy 4.1 (PlatformIO, C/C++)                                    |
-| Stepper drivers    | TMC2209 ×2                                                        |
-| Position feedback  | Quadrature optical encoders ≥ 2000 CPR ×2                         |
-| Vacuum relays      | Gigavac G2/G81 ×3 (Hi-Z, Lo-Z, bypass)                            |
-| RF detection       | AD8302 + AD8307 ×2 behind a Tandem-match coupler                  |
-| Master MCU         | Raspberry Pi 4/5 with HDMI touchscreen                            |
-| Master service     | Go, single static binary, embedded web UI via `go:embed`          |
+| Network topology   | **Balanced L-Network** (default, 2 axes) or **Balanced Pi-Network** (3 axes), declared at install with `set_topology` |
+| Balun              | 1:1 Guanella current balun, fixed, on the transceiver side (Fair-Rite 43 / 31) |
+| Tuner-side MCU     | Teensy 4.1 (Phase 1); STM32H743 on a custom board only if M5 RF testing demands it |
+| Tuner-side carrier | grblHAL-teensy-4.x V2.09 (Phil Barrett; T41E5XBB with the PJRC Ethernet kit) |
+| Firmware           | C/C++, PlatformIO + Teensyduino; QNEthernet or NativeEthernet; ArduinoJson |
+| Element actuators  | JMC iHSS60 integrated closed-loop stepper (NEMA 24) ×2 / ×3, coupled directly to the element, 6400 steps per element turn |
+| Inductor           | Two matched roller inductors, one per line leg, on one motor (1:1 GT2 belt) — one axis, `L = 2 × L_leg` |
+| Capacitor          | Vacuum variable, e.g. Jennings UCSL-1500 (10–1500 pF, 5 kV) — ×1 (Balanced L) / ×2 (Balanced Pi) |
+| Step pulses        | FlexPWM hardware generation, pulses counted in the reload ISR (`firmware/lib/flexpwm_stepper`) |
+| Position truth     | Pulse counter anchored by homing or a clean-shutdown record; iHSS60 ALM / PED opto outputs as drive feedback (no external encoder) |
+| Limit switches     | Home + max per axis on a 3:1 belt-driven lead screw, NC in series into one carrier opto input |
+| Vacuum relays      | Gigavac G2/G81 or Kilovac H, two-pole per switch: K1 Hi-Z, K2 Lo-Z, K3 bypass (Balanced L); K3 only (Balanced Pi) |
+| RF detection       | AD8302 + AD8307 ×2 behind a Stockton / Tandem-match coupler       |
+| Controller link    | Line-JSON over TCP, port 8089 (master); HTTP bring-up page and firmware update, port 80 |
+| Master MCU         | Raspberry Pi 4/5 with 7" / 10" capacitive touchscreen             |
+| Master service     | Go, single static binary, embedded web UI via `go:embed` on port 8088 |
 | Master deps        | `gorilla/websocket`, `BurntSushi/toml`, `modernc.org/sqlite`      |
-| Operator input     | 2 × Adafruit ANO directional encoder (Adafruit p/n 5735)          |
+| Operator input     | Adafruit ANO directional encoder (p/n 5735), one per element axis: 2 / 3 |
 | Transceiver link   | USB serial CAT (CI-V / Yaesu / Kenwood / K3/K4)                   |
 
 ## Why this shape (briefly)
@@ -214,7 +251,11 @@ LP-100A-Server: one Go binary on the Pi, embedded UI, WebSocket fan-out,
 TOML config, systemd deployment. New device, same shape — uniform to
 operate, uniform to debug.
 
-The L-network topology is what the user specified: a single L and a single
-C with the C electrically movable to either side via vacuum relays. Not a
-T-network, not a pi-network, not a balanced tuner. See
-[CLAUDE.md](CLAUDE.md) §"RF topology" for why that's locked in.
+The network is **balanced** because the Doublet is fed with ladder line.
+With the 1:1 current balun on the transceiver side, the balun always
+works at its 50 Ω design impedance and the ladder line is fed straight
+from the network. **Balanced L** is the default: it has the fewest
+elements, and vacuum relays put the capacitor on either side of the
+inductor pair. **Balanced Pi** is supported for installs that want to
+cover both impedance ranges without a selector, at the cost of a third
+axis. See [CLAUDE.md](CLAUDE.md) §"RF topology" for the contract.

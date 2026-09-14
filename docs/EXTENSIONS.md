@@ -25,9 +25,10 @@ single Doublet, single rig) is the committed scope; Phase 2 milestones
 
 ## 1. Phase 1 recap and Phase 2 scope boundary
 
-**Phase 1 (committed)** — single L-network tuner driving a single
-Doublet on 460 / 600 Ω ladder line, single transceiver via CAT. One
-master, one tuner-controller, one balun.
+**Phase 1 (committed)** — single balanced-network tuner (Balanced L by
+default, Balanced Pi optional) driving a single Doublet on 460 / 600 Ω
+ladder line, single transceiver via CAT. One master, one
+tuner-controller, one 1:1 current balun on the transceiver side.
 
 **Phase 2 (this document)** — the same master orchestrates:
 
@@ -59,7 +60,7 @@ type          = "doublet_ladder"        # see "Antenna types" below
 bands         = ["160m", "80m", "40m", "30m", "20m", "17m", "15m", "12m", "10m", "6m"]
 feed          = "balanced_600ohm"
 needs_tuner   = true                    # always
-balun_ratio   = "1:1"                   # or "4:1"
+balun_ratio   = "1:1"                   # current balun, transceiver side (fixed)
 max_power_w   = 1500
 notes         = "Phase 1 default; doc'd in HARDWARE.md §9"
 
@@ -87,7 +88,7 @@ max_power_w   = 1500
 
 The `type` is a discriminator for:
 
-- the **tuner action** at engage time (bypass vs full L-network match);
+- the **tuner action** at engage time (bypass vs full network match);
 - the **per-band hint table** the algorithm uses to seed
   (see [`TUNING.md`](TUNING.md) §2) — each type has its own;
 - the **memory schema key** (see §6);
@@ -99,9 +100,9 @@ The `type` is a discriminator for:
 The Phase 1 tuning strategy (TUNING.md Proposal D) extends naturally
 to any antenna whose `needs_tuner = true`. For `needs_tuner = false`
 antennas, the master skips the entire tuning state machine: on
-selection it just sends `set_bypass true`, performs a `set_side`
-to a configured default (typically Hi-Z, irrelevant in bypass), and
-considers the antenna engaged.
+selection it just sends `set_bypass true` (plus, on a Balanced L, a
+`set_side` to a configured default — typically Hi-Z, irrelevant in
+bypass) and considers the antenna engaged.
 
 The HexBeam case is the cheap path:
 
@@ -294,7 +295,7 @@ recall(radio, freq_hz):
   antenna  := routing.resolve(radio, band(freq_hz), freq_hz)
   bucket   := bucket_for(antenna.type, band, freq_hz)
   slot     := SELECT FROM slot WHERE antenna_id=antenna AND band=band AND freq_hz=bucket
-  if slot found and antenna.needs_tuner: drive to (l_steps, c_steps, side)
+  if slot found and antenna.needs_tuner: drive to (positions[], side)
   else:                                  set_bypass true (HexBeam-class)
 ```
 
@@ -342,7 +343,7 @@ Radio 2 ──┘               │                 └── …
                           └── routed at switch time
 ```
 
-One L-network, one set of motors, one tuner-controller. Radios are
+One balanced network, one set of motors, one tuner-controller. Radios are
 multiplexed at the input; antennas at the output.
 
 **Pros**
@@ -375,7 +376,7 @@ antennas (HexBeam, Yagi); a radio→antenna switch matrix in front.
 - Matches the TGXL design philosophy.
 
 **Cons**
-- Hardware cost: N tuners instead of one. The L-network electronics dominate the tuner BoM; this multiplies it by N for multi-band antennas.
+- Hardware cost: N tuners instead of one. The network electronics dominate the tuner BoM; this multiplies it by N for multi-band antennas.
 - Bypass-only antennas (HexBeam, Yagi) need cheaper "tuner-shaped" boxes — just a balun, a relay, optional small fixed L/C. Plan a separate cheap-path BoM.
 - Coordination logic on master is more complex (one tunerclient per controller).
 - Calibration sweep per antenna at install.
@@ -412,7 +413,7 @@ Radio 2 ──┘        ├── Bypass ────── Yagi 20m
 ```
 
 Only the Doublet (or other always-needs-tuner antennas) gets the
-full L-network. HexBeam-class antennas use a simple bypass path
+full balanced network. HexBeam-class antennas use a simple bypass path
 with optional fixed match.
 
 **Pros**

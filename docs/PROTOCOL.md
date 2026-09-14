@@ -254,7 +254,12 @@ master only (the controller has no memory).
     "band": "20m",
     "freq_hz": 14175000,
     "bucket_hz": 50000,
+    "topology": "balanced_l",
     "slot": {
+      "positions": [
+        { "name": "L", "steps": 18432 },
+        { "name": "C", "steps": 9216 }
+      ],
       "l_steps": 18432,
       "c_steps": 9216,
       "side": "hi_z",
@@ -269,6 +274,12 @@ master only (the controller has no memory).
 
 `op` is one of `recall` | `save` | `delete` | `list`. `slot` is null
 when `found` is false.
+
+`topology` is the network the slot was saved under; slots never cross
+topologies. `positions[]` holds one entry per element of that topology,
+by element name (`L`, `C` on Balanced L; `C1`, `L`, `C2` on Balanced
+Pi). `side` is present on Balanced L only. `l_steps` / `c_steps` are v1
+compatibility copies, as in `state`.
 
 ### 2.4 `qrg`
 
@@ -387,10 +398,10 @@ an `ack`, but with `ref: null`.
 | `set_speed`  | `{ "axis": .., "speed": uint, "accel"?: uint }`    | controller| Cruise steps/s (1..200000) and ramp steps/s². Persisted. |
 | `set_enabled`| `{ "axis": .., "on": bool }`                       | controller| Driver ENA. Off is a setup-only action (turn the element by hand); the position is untrusted until home is re-declared. |
 | `set_topology` | `{ "kind": "balanced_l" \| "balanced_pi", "elements": [ {"name","type","axis","pair"} ] }` | controller | Declare the wired network and the element→axis map (CLAUDE.md "Topology vs firmware"). Requires `bypass:true` and no motion; refused `duplicate_axis` / `bad_axis` / `bad_elements`. Persisted to NVRAM and applied immediately. |
-| `set_side`   | `{ "side": "hi_z" \| "lo_z" }`                     | controller| Refused if RF present. Auto-engages bypass first.    |
+| `set_side`   | `{ "side": "hi_z" \| "lo_z" }`                     | controller| Balanced L only (`wrong_topology` otherwise). Refused if RF present. Auto-engages bypass first. |
 | `set_bypass` | `{ "bypass": bool }` *or* `{ "on": bool }`         | controller| The only relay verb accepted while RF is present.    |
 | `recall`     | `{ "freq_hz": uint }`                             | master    | Master expands into a sequence of controller verbs.  |
-| `save`       | `{ "freq_hz": uint, "label"?: string }`           | master    | Persists current `state` for `(band, bucket)`.       |
+| `save`       | `{ "freq_hz": uint, "label"?: string }`           | master    | Persists the current element positions (and `side` on Balanced L) for `(topology, band, bucket)`. |
 | `auto_tune`  | `{ "freq_hz": uint, "power_w": float }`           | master    | Master orchestrates analytic + hill-climb.           |
 | `home`       | `{}`                                              | controller| Drives every topology-bound axis back to its declared home (0). Refused `not_anchored` unless all of them are anchored. (The lead-screw limit-switch homing routine replaces this once the mechanism is fitted.) |
 | `resync`     | `{}`                                              | either    | Server re-emits current `state` + `telemetry`.       |

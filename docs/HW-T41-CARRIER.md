@@ -17,14 +17,17 @@ also needs:
   must remain a small port) is unaffected: the application layer never
   touches the carrier's GRBL/CNC heritage.
 - 5 independent stepper channels (STEP / DIR / EN per axis) on screw
-  terminals — covers the 2 axes an L-Match needs and the 3 axes a T-
-  or Pi-Match needs, with axes to spare for future expansion.
+  terminals — covers the 2 axes a Balanced L-Network needs and the 3
+  axes a Balanced Pi-Network needs, with axes to spare for future
+  expansion.
 - 10 opto-isolated digital inputs — limit switches per axis, probe,
-  reset, feed-hold, cycle-start, safety-door. Repurposable for our
-  end-stops, the operator panic line, and any auxiliary inputs.
+  reset, feed-hold, cycle-start, safety-door. Repurposed for the
+  lead-screw limit switches (home + max in series, one input per axis),
+  the iHSS60 PED / ALM drive feedback, and the operator panic line.
 - 7 relay-driver outputs (open-collector, 5 V/12 V coil-voltage jumper)
-  — drives the L-network selector relays (K1/K2/K3) and any
-  bandswitch / antenna-select / fault-output we add later.
+  — drives the Balanced-L selector relays (K1/K2) and the bypass (K3),
+  each two-pole from one output, plus any bandswitch / antenna-select /
+  fault-output we add later.
 - 4 EMI-protected, Schmitt-triggered digital inputs (15.9 kHz LPF) —
   spare for tach / encoder index / external trigger.
 - 0–10 V analog spindle output — **not used** by the tuner, but
@@ -79,56 +82,65 @@ only and have migrated to KiCad.
 
 ## Mapping to tuner needs
 
-### L-Match (2 axes, current baseline)
+### Balanced L-Network (2 axes, default)
 
 | Function                | Carrier resource                          | Notes                                                |
 | ----------------------- | ----------------------------------------- | ---------------------------------------------------- |
-| Roller-inductor stepper | Axis 0 (STEP/DIR/EN)                      | JMC iHSS60 integrated closed-loop stepper (STEP / DIR / EN into the drive's opto inputs) per CLAUDE.md hardware contract |
-| Vacuum-cap stepper      | Axis 1 (STEP/DIR/EN)                      | Same driver family                                   |
-| L axis end-stop         | Opto input — limit X                      | Mechanical microswitch at mechanical home            |
-| C axis end-stop         | Opto input — limit Y                      | Same                                                 |
-| Hi-Z relay K1           | Relay driver 1                            | Drives external 26 V vacuum-relay coil               |
-| Lo-Z relay K2           | Relay driver 2                            | Same                                                 |
-| Bypass relay K3         | Relay driver 3                            | Same; latched on at power-up per invariant 2         |
-| TX-key panic input      | Opto input — feed-hold                    | Hardware kill while PTT'd                            |
+| `L` inductor-pair stepper | Axis X (STEP/DIR/EN)                    | One JMC iHSS60 integrated closed-loop stepper coupled directly to the first roller inductor; the second coil is belted 1:1 off the same shaft (CLAUDE.md hardware contract) |
+| `C` vacuum-cap stepper  | Axis Y (STEP/DIR/EN)                      | Same drive, coupled directly to the capacitor shaft  |
+| `L` limit switches      | Opto input — limit X (pin 20)             | Home + max switches beside the axis's 3:1 lead screw, NC in series: open = at a limit or a cable fault |
+| `C` limit switches      | Opto input — limit Y (pin 21)             | Same                                                 |
+| Drive PED, motors X / Y | Opto inputs — limit A / B (pins 23 / 28)  | Arrival confirmation per move; opt-in ([DRIVE-FEEDBACK.md](DRIVE-FEEDBACK.md)) |
+| Drive ALM, all drives   | Opto input — safety door (pin 29)         | The drives' ALM outputs in parallel; opt-in          |
+| Hi-Z relay K1           | Relay driver — pin 12                     | Two-pole (both line legs); external 26 V vacuum-relay coils |
+| Lo-Z relay K2           | Relay driver — pin 11                     | Same                                                 |
+| Bypass relay K3         | Relay driver — pin 19                     | Two-pole changeover; de-energised = bypass, latched at power-up per invariant 2 |
+| TX-key panic input      | Opto input — feed-hold (pin 16)           | Hardware kill while PTT'd                            |
 | RF detector chain       | Direct to Teensy ADC pins (not via opto)  | AD8302 + AD8307×2; analog, bypasses the carrier inputs |
 
-### T-Match / Pi-Match (3 axes, added scope)
+### Balanced Pi-Network (3 axes)
 
 | Function                | Carrier resource                          | Notes                                                |
 | ----------------------- | ----------------------------------------- | ---------------------------------------------------- |
-| Element-1 stepper       | Axis 0                                    | T: series-C₁; Pi: shunt-C₁                           |
-| Element-2 stepper       | Axis 1                                    | T: series-C₂; Pi: series-L                           |
-| Element-3 stepper       | Axis 2                                    | T: shunt-L; Pi: shunt-C₂                             |
-| End-stops               | Opto inputs — limits X / Y / Z            | One per axis                                         |
-| Selector/bypass relays  | Relay drivers 1–3 (or more)               | T/Pi may not need the L-Match Hi-Z/Lo-Z selector, but reuse K3 as bypass |
+| `C1` stepper            | Axis X                                    | Capacitor across the line, transceiver side          |
+| `L` inductor-pair stepper | Axis Y                                  | Synchronized pair in series, as in Balanced L        |
+| `C2` stepper            | Axis Z                                    | Capacitor across the line, antenna side              |
+| Limit switches          | Opto inputs — limits X / Y / Z (20 / 21 / 22) | Home + max per axis, NC in series                |
+| Drive PED, motor Z      | Opto input — probe (pin 15)               | In addition to PED X / Y above                       |
+| Bypass relay K3         | Relay driver — pin 19                     | K1 / K2 are absent: the Pi needs no side selector    |
 
-Element-to-axis mapping is **per-topology configuration**, not hard-
-coded. The HAL exposes axes 0/1/2 as opaque `step_axis_t` handles; the
-application layer reads a TOML/JSON topology block (served by the
-master, persisted on the controller) that names each element, gives its
-type (L / C), connects it to a HAL axis, and stores its
-calibration and limits.
+The axis columns are the firmware defaults (`hal/board/t41_v209.h`).
+Element-to-axis mapping is **per-install configuration**, not
+hard-coded: the HAL exposes axes 0/1/2 as opaque `hal::Axis` handles,
+and the `set_topology` block (served by the master, persisted on the
+controller) names each element, gives its type (L / C), binds it to an
+axis — the operator's motor-to-component choice — marks the inductor
+pair, and carries its calibration and limits.
 
 ## Topology selection (firmware)
 
 The chosen topology is determined at runtime, not compile-time:
 
-- The controller boots with **topology = unknown**, refuses every
-  control verb except `set_topology` and `home`.
-- The master sends a `set_topology` frame (new verb, see
-  [docs/PROTOCOL.md](PROTOCOL.md)) carrying `{ kind: "L" | "T" | "Pi",
-  elements: [...] }` either at first connect or from the saved
-  station config.
-- Once accepted, the controller commits the topology to NVRAM and
-  starts accepting motion verbs.
-- Switching topology requires a power cycle (intentional — physically
-  changing the network is a hardware change, the verb just declares
-  what's wired).
+- The controller boots with the topology it last persisted; a fresh
+  controller starts on the default Balanced L map (`L` → axis X,
+  `C` → axis Y).
+- `set_topology` (see [docs/PROTOCOL.md](PROTOCOL.md)) carries
+  `{ kind: "balanced_l" | "balanced_pi", elements: [...] }`. The
+  firmware checks that the element set matches the kind
+  (`bad_elements`), that every axis exists (`bad_axis`) and that no two
+  elements share one (`duplicate_axis`), and marks `L` as the inductor
+  pair.
+- The verb is accepted only with bypass engaged and no axis moving
+  (`not_bypassed`, `moving`); the controller then commits the topology
+  to NVRAM and applies it at once. `set_side` is refused with
+  `wrong_topology` on a Balanced Pi.
+- The verb only declares what is wired — physically changing the
+  network is a hardware change. [CLAUDE.md](../CLAUDE.md) "RF topology"
+  calls for a power cycle after a change; the firmware does not enforce
+  one today.
 
-The HAL's `stepper_t` array sizes itself at compile time to
-`MAX_TOPOLOGY_AXES = 3`; an L-Match leaves the third element unbound
-and unused.
+The HAL sizes its axis arrays at compile time to `hal::kMaxAxes = 3`; a
+Balanced L leaves the third channel unbound and unused.
 
 ## Firmware architecture impact
 
@@ -138,17 +150,19 @@ and unused.
 
 ```
 firmware/tuner-controller/
-├── hal/
-│   ├── stepper.h           # generic axis interface
-│   ├── encoder.h
-│   ├── adc.h
-│   ├── relay.h
-│   └── board/
-│       ├── t41_v209.h      # Teensy-4.1 + grblHAL-T41-V2.09 carrier
-│       ├── t41_v209.cpp    #   pin map only; no logic
-│       └── bench.h         #   bare Teensy-4.1 dev board (current)
-├── app/                    # topology-aware control loop, protocol, …
-└── platformio.ini          # one env per (MCU, carrier) pair
+├── src/
+│   ├── hal/
+│   │   ├── hal.h               # motor, encoder, limits, feedback, relay, safety, nvs, sdcard, firmware, led
+│   │   ├── *_teensy41.cpp      # real drivers on the V2.09 carrier (TARGET_TEENSY41)
+│   │   ├── *_sim.cpp           # simulation backends for the native unit tests
+│   │   └── board/
+│   │       ├── t41_v209.h      # Teensy-4.1 + grblHAL-T41-V2.09 carrier
+│   │       └── t41_v209.cpp    #   pin map only; no logic
+│   ├── app/                    # topology-aware motion, config, settings, OTA, protocol
+│   ├── tuner_server.cpp        # master link (line-JSON over TCP, port 8089)
+│   └── http_server.cpp         # bring-up page + firmware update (port 80)
+├── test/                       # native unit tests (env:native)
+└── platformio.ini              # one env per (MCU, Ethernet backend), plus *_ota upload variants
 ```
 
 - The board file is **pin map + relay enable polarity + opto polarity
@@ -167,17 +181,17 @@ firmware/tuner-controller/
 
 This board changes M1b.2 onwards. M0 / M1a / M1b.1 are unaffected.
 
-| Step  | Goal                                                                                           |
-| ----- | ---------------------------------------------------------------------------------------------- |
-| H1    | **Buy / assemble** one T41E5XBB V2.09 board (or open-box T41U5XBB if Ethernet not yet needed). Verify against upstream BOM. |
-| H2    | **Wire up two iHSS60 integrated closed-loop steppers** (STEP/DIR/EN from axes 0/1; TMC2209 / DM542 acceptable as bench substitutes) + opto-input limit-switch on each axis. |
-| H2b   | **Closed-loop driver feedback (final-build check).** iHSS60 adopted into the CLAUDE.md hardware contract 2026-09-05. Wire ALM (and PED) to the spare opto inputs per [HW-T41-PINMAP.md](HW-T41-PINMAP.md) §2.2, set P10 = 1 fail-safe polarity, verify ≈ 10 mA LED current through the drive's opto transistor, add ALM-stop / PED-confirm handling to the motor HAL. Decision + verification recorded at H9. |
-| H3    | **Wire three relay outputs** (driver 1/2/3) to a 3-relay test board representing K1/K2/K3.    |
-| H4    | **Wire the Ethernet jack** (PJRC kit, T41E5XBB variant only) and prove the existing tuner-controller's network HAL still pings the master. |
-| H5    | **Re-validate firmware-portability rule:** the existing tuner-controller firmware must compile against the new `hal/board/t41_v209.*` with no application-layer change. |
-| H6    | **Topology negotiation:** implement `set_topology` verb and the topology-aware state machine; verify L-Match end-to-end via simulated RF, then on the real Doublet at low power. |
-| H7    | **T-Match dry-run** on the bench (no antenna, fixed dummy load) to prove the 3-axis path. Tuning algorithm changes deferred — initial T-Match support is "drive each element to a commanded position", not auto-tune. |
-| H8    | **Pi-Match dry-run** — same scope as H7.                                                       |
+| Step  | Goal                                                                                           | Status (2026-09-14) |
+| ----- | ---------------------------------------------------------------------------------------------- | ------------------- |
+| H1    | **Buy / assemble** one T41E5XBB V2.09 board (or open-box T41U5XBB if Ethernet not yet needed). Verify against upstream BOM. | ✅ bench board in service |
+| H2    | **Wire up the iHSS60 integrated closed-loop steppers** — STEP/DIR/EN from channels X / Y, plus Z for a Balanced Pi (TB6600 / DM542 acceptable as bench substitutes) — and each axis's lead-screw home + max limit switches, NC in series into its limit input. | ◐ drives on the bench; lead-screw limit mechanism pending |
+| H2b   | **Closed-loop driver feedback.** Wire PED per motor and the ALMs in parallel per [HW-T41-PINMAP.md](HW-T41-PINMAP.md) §2.2, verify ≈ 10 mA LED current through the drive's opto transistor and a clean LOW at the Teensy, then enable supervision from the browser page ([DRIVE-FEEDBACK.md](DRIVE-FEEDBACK.md)). P10 stays at the drive default 0; P10 = 1 needs the HISU tool and series ALM wiring. | ◐ firmware ✅ 2026-09-13; wiring pending |
+| H3    | **Wire three relay outputs** (pins 12 / 11 / 19) to a test board representing K1/K2/K3, each two-pole. | ◐ firmware ✅ 2026-09-06; wiring pending |
+| H4    | **Wire the Ethernet jack** (PJRC kit, T41E5XBB variant only) and prove the existing tuner-controller's network HAL still pings the master. | ✅ |
+| H5    | **Re-validate firmware-portability rule:** the existing tuner-controller firmware must compile against the new `hal/board/t41_v209.*` with no application-layer change. | ✅ 2026-09-06 |
+| H6    | **Topology negotiation:** implement `set_topology` verb and the topology-aware state machine; verify Balanced L end-to-end via simulated RF, then on the real Doublet at low power. | ◐ verb ✅ 2026-09-06; RF verification with M2 / M5 |
+| H7    | ~~**T-Match dry-run**~~ — dropped 2026-09-05 with T-Match.                                     | —                   |
+| H8    | **Balanced Pi dry-run** on the bench (no antenna, fixed dummy load) to prove the 3-axis path. Initial support is "drive each element to a commanded position", not auto-tune. | ◐ bench board declared `balanced_pi` on three motor channels |
 | H9    | **Phase-2 decision** — same content as the existing PLAN.md M5 RF-commissioning go/no-go. The decision now also includes "does the off-the-shelf carrier's ground plane and opto isolation hold up at full-legal-limit RF, or do we still need a custom carrier?"  |
 
 ## Licensing and IP

@@ -19,13 +19,18 @@ design, not upstream.
 
 Each axis drives a JMC iHSS60 integrated closed-loop stepper (STEP / DIR / EN into the drive's opto inputs; TMC2209 / DM542 / TB6600 also work on the bench) via STEP / DIR / EN screw terminals on the carrier.
 
-| Axis | STEP | DIR  | EN   | STEP-pin PWM source       | Tuner use (L-Match)        | Tuner use (T-Match) | Tuner use (Pi-Match) |
-| ---- | ---- | ---- | ---- | ------------------------- | -------------------------- | ------------------- | -------------------- |
-| X    | 2    | 3    | 10   | **FlexPWM4.2 A**          | Roller inductor (L)        | Series C₁           | Shunt C₁             |
-| Y    | 4    | 5    | 40   | **FlexPWM2.0 A**          | Vacuum-variable cap (C)    | Series C₂           | Series L             |
-| Z    | 6    | 7    | 39   | **FlexPWM2.2 A**          | *(unused)*                 | Shunt L             | Shunt C₂             |
-| M3   | 8    | 9    | 38   | **FlexPWM1.3 A**          | *(spare — bandswitch, etc.)* | spare             | spare                |
-| M4   | 26   | 27   | 37   | **none** (PIT-ISR only)   | *(spare)*                  | spare               | spare                |
+| Axis | STEP | DIR  | EN   | STEP-pin PWM source       | Tuner use (Balanced L)       | Tuner use (Balanced Pi)          |
+| ---- | ---- | ---- | ---- | ------------------------- | ---------------------------- | -------------------------------- |
+| X    | 2    | 3    | 10   | **FlexPWM4.2 A**          | Roller-inductor pair (`L`)   | C₁ across the line, TX side      |
+| Y    | 4    | 5    | 40   | **FlexPWM2.0 A**          | Vacuum-variable cap (`C`)    | Roller-inductor pair (`L`)       |
+| Z    | 6    | 7    | 39   | **FlexPWM2.2 A**          | *(unused)*                   | C₂ across the line, antenna side |
+| M3   | 8    | 9    | 38   | **FlexPWM1.3 A**          | *(spare — bandswitch, etc.)* | spare                            |
+| M4   | 26   | 27   | 37   | **none** (PIT-ISR only)   | *(spare)*                    | spare                            |
+
+The tuner-use columns are the firmware defaults (`hal/board/t41_v209.h`);
+the operator may bind any element to any of X / Y / Z with
+`set_topology`. The inductor pair is a single axis: one iHSS60 turns both
+coils through a 1:1 GT2 belt.
 
 **ENA polarity:** active-LOW on most external drivers (LOW = driver
 enabled, coils energised). Confirm with the `T` command in
@@ -69,11 +74,20 @@ same `hal/motor_teensy41.cpp` interface.
 
 | Pin  | Board net    | Tuner use                                  |
 | ---- | ------------ | ------------------------------------------ |
-| 20   | X LIMIT      | X-axis mechanical home microswitch         |
-| 21   | Y LIMIT      | Y-axis mechanical home microswitch         |
-| 22   | Z LIMIT      | Z-axis mechanical home microswitch (T/Pi)  |
+| 20   | X LIMIT      | X-axis lead-screw home + max switches, NC in series |
+| 21   | Y LIMIT      | Y-axis lead-screw home + max switches, NC in series |
+| 22   | Z LIMIT      | Z-axis lead-screw home + max switches, NC in series (Balanced Pi) |
 | 23   | A LIMIT (M3) | Closed-loop driver **PED, motor X (axis 0)** — §2.2 (firmware 2026-09-13, off until enabled). Was: spare fault input |
 | 28   | B LIMIT (M4) | Closed-loop driver **PED, motor Y (axis 1)** — §2.2 (firmware 2026-09-13, off until enabled). Shared with AUXINPUT5 (MPG mode) |
+
+**Two switches, one input.** Each axis's home and max switches sit
+beside its 3:1 belt-driven lead screw, wired NC in series into that
+axis's single limit input: open (input asserted) means "at a limit, or a
+cable fault", and the firmware tells the two ends apart by the direction
+of travel ([CLAUDE.md](../CLAUDE.md) invariant 7). The two-switch
+mechanism therefore costs no extra inputs — two limit inputs for
+Balanced L, three for Balanced Pi — and leaves A / B LIMIT, PROBE and
+SAFETY DOOR free for the drive feedback of §2.2.
 
 ### 2.1 · Opto-input electrical design (all ten inputs)
 
@@ -93,7 +107,7 @@ identical; see [HW-T41-CARRIER.md](HW-T41-CARRIER.md) references):
 - Propagation ≈ 50–100 µs through the EL357N + RC — fine for status
   and fault signals, unusable for encoder edges (§4 note).
 
-### 2.2 · Closed-loop driver feedback inputs (ALM / PED) — selected, verify at final build
+### 2.2 · Closed-loop driver feedback inputs (ALM / PED) — implemented, verify at final build
 
 Context: the **JMC iHSS60 integrated closed-loop stepper** (NEMA 24,
 6400 pulses/rev DIP setting, 200 kHz max input) was bench-tested on the
@@ -173,13 +187,19 @@ DIR setup / hold.
       clean LOW at the Teensy pin.
 - [ ] Set P10 = 1 (fail-safe) with the HISU tool, or document that
       P10 = 0 is in use and add a cable-present plausibility check.
+      *(P10 = 0 with parallel ALMs is the documented default in
+      [DRIVE-FEEDBACK.md](DRIVE-FEEDBACK.md); PED reveals a drive power
+      loss, but an open ALM cable still reads as healthy.)*
 - [ ] Set P16 (position error limit) to a value meaningful for the
-      geared capacitor / inductor; the manual does not state the
+      direct-coupled capacitor / inductor; the manual does not state the
       encoder resolution, so measure counts-per-rev on the bench first.
-- [ ] Re-run the pin allocation (§7) once ALM/PED pins are final;
-      update `hal/board/t41_v209.h`.
+- [x] Re-run the pin allocation (§7) once ALM/PED pins are final;
+      update `hal/board/t41_v209.h`. *(2026-09-13: PED 23 / 28 / 15,
+      ALM 29.)*
 - [ ] Carry the DIR setup/hold and pulse-width limits into the
       production motor HAL and into `docs/HARDWARE.md` per-driver table.
+      *(Motor HAL done — `flexpwm_stepper` uses 10 µs DIR setup / hold;
+      the HARDWARE.md per-driver table is still to write.)*
 
 ## 3 · GRBL control inputs (opto-isolated) — repurposed for tuner
 
@@ -206,7 +226,7 @@ GRBL-control inputs in §2 / §3. Call this the **tier-1 input bank**.
 | 30   | AUXINPUT1 / QEI_A        | Axis-1 encoder A (Phase 2)                        |
 | 34   | AUXINPUT2 / QEI_B        | Axis-1 encoder B (Phase 2)                        |
 | 35   | AUXINPUT3 / QEI_SELECT   | Axis-1 encoder Z / index (Phase 2)                |
-| 36   | AUXINPUT0                | Motor-fault aggregate (default; moves to the opto inputs of §2.2 if closed-loop drives with ALM are adopted); axis-2 encoder A if repurposed |
+| 36   | AUXINPUT0                | Spare — the motor-fault aggregate moved to ALM on pin 29 (§2.2); axis-2 encoder A if repurposed |
 | 41   | AUXINPUT4 / I²C strobe   | spare (I²C bus if a daughterboard is fitted); axis-2 encoder B if repurposed |
 
 grblHAL's stock board map defines exactly one hardware-decoded
@@ -217,9 +237,10 @@ same way and allocates additional axes per the budget below.
 
 ### 4.1 · Encoder pin budget (Phase 2)
 
-[CLAUDE.md](../CLAUDE.md) invariant #3 makes encoders the position
-truth when fitted. Per-axis encoders are an M5+ Phase-2 deliverable
-(see [HARDWARE.md](HARDWARE.md) BoM — "Position encoder"). The
+External encoders apply only to a non-integrated motor (Phase-2
+fallback): with the iHSS60 the drive's encoder is internal and the pulse
+counter is the position truth ([CLAUDE.md](../CLAUDE.md) invariant #3;
+[HARDWARE.md](HARDWARE.md) BoM — "Position encoder"). The
 tier-1 input bank constrains how many axes the carrier can host
 directly:
 
@@ -228,7 +249,7 @@ directly:
   36) and the I²C-strobe option (pin 41). Motor-fault aggregation
   can be re-implemented as an external OR / wired-OR feeding a
   spare opto input.
-- **3 axes** (full T/Pi-Match per-axis encoders): **does not fit**
+- **3 axes** (a Balanced Pi with per-axis encoders): **does not fit**
   on the tier-1 bank — short by at least one A/B pair. Pick one:
 
   1. **External SPI quadrature counter** (LS7366R or HCTL-2032
@@ -244,7 +265,7 @@ directly:
      filter mounted near the connector. Cheaper than (1) but
      adds risk and bypasses the carrier's RF-hardening intent.
   3. **Equip only the most stall-prone axis** (typically the
-     roller inductor on a stiff gearbox), leave other axes
+     roller-inductor pair), leave other axes
      open-loop. Reduces the value of invariant #3's drift
      detection but is the cheapest path.
 
@@ -305,14 +326,19 @@ MOSFET stages (HV bias side is independent).
 
 | Pin  | grblHAL alias    | Board net      | Tuner use                                   |
 | ---- | ---------------- | -------------- | ------------------------------------------- |
-| 11   | AUXOUTPUT4 / Spindle DIR  | SPINDLE DIR    | **K2 — Lo-Z selector** (L-Match)            |
-| 12   | AUXOUTPUT3 / Spindle EN   | SPINDLE EN     | **K1 — Hi-Z selector** (L-Match)            |
+| 11   | AUXOUTPUT4 / Spindle DIR  | SPINDLE DIR    | **K2 — Lo-Z selector** (Balanced L, two-pole) |
+| 12   | AUXOUTPUT3 / Spindle EN   | SPINDLE EN     | **K1 — Hi-Z selector** (Balanced L, two-pole) |
 | 13   | AUXOUTPUT5 / Spindle PWM  | SPINDLE PWM    | Unused (0–10 V analog, irrelevant to tuner) |
 | 18   | AUXOUTPUT7 / Coolant MIST | COOLANT MIST   | Spare — bandswitch / antenna-select         |
-| 19   | AUXOUTPUT6 / Coolant FLOOD| COOLANT FLOOD  | **K3 — bypass relay** (latched at power-up) |
+| 19   | AUXOUTPUT6 / Coolant FLOOD| COOLANT FLOOD  | **K3 — bypass changeover** (two-pole; de-energised = bypass, latched at power-up) |
 | 31   | AUXOUTPUT0       | (aux relay 1)  | Spare — fault-output indicator              |
 | 32   | AUXOUTPUT1       | (aux relay 2)  | Spare                                       |
 | 33   | AUXOUTPUT2 / SPINDLE1 PWM | (aux relay 3 / shared) | Spare                              |
+
+Every switch is two-pole — both line legs — from one output: two relays
+with paralleled coils or one DPST / DPDT unit (open decision #9 in
+[PLAN.md](PLAN.md)); check the paralleled coil current against the
+output driver.
 
 Note: pin 33 is dual-purposed in the grblHAL source (AUXOUTPUT2 *and*
 SPINDLE1_PWM). The factory-default carrier wiring is the relay-driver
@@ -332,18 +358,18 @@ role; treat the PWM alias as unused for our application.
 
 The pins our firmware actually drives, in topology order:
 
-### L-Match (2 stepper axes)
+### Balanced L-Network (2 stepper axes, default map)
 
 | Function          | Teensy pin | Carrier net   |
 | ----------------- | ---------- | ------------- |
-| Roller-inductor STEP | 2       | X STEP        |
-| Roller-inductor DIR  | 3       | X DIR         |
-| Roller-inductor EN   | 10      | X ENABLE      |
+| Inductor-pair STEP   | 2       | X STEP        |
+| Inductor-pair DIR    | 3       | X DIR         |
+| Inductor-pair EN     | 10      | X ENABLE      |
 | Vacuum-cap STEP   | 4          | Y STEP        |
 | Vacuum-cap DIR    | 5          | Y DIR         |
 | Vacuum-cap EN     | 40         | Y ENABLE      |
-| L-axis end-stop   | 20         | X LIMIT       |
-| C-axis end-stop   | 21         | Y LIMIT       |
+| L-axis home + max | 20         | X LIMIT       |
+| C-axis home + max | 21         | Y LIMIT       |
 | K1 (Hi-Z)         | 12         | SPINDLE EN    |
 | K2 (Lo-Z)         | 11         | SPINDLE DIR   |
 | K3 (Bypass)       | 19         | COOLANT FLOOD |
@@ -352,21 +378,22 @@ The pins our firmware actually drives, in topology order:
 | Driver PED, motor Y *(§2.2)* | 28 | B LIMIT |
 | Driver ALM, all drives in parallel *(§2.2)* | 29 | SAFETY DOOR |
 
-### T-Match / Pi-Match (3 stepper axes)
+### Balanced Pi-Network (3 stepper axes, default map)
 
-Adds a third stepper on the Z axis:
+Adds a third stepper on the Z axis. The X / Y pins above stay the same
+but carry the Pi's default elements — X = C1, Y = inductor pair (L),
+Z = C2 — and K1 / K2 are not fitted:
 
 | Function       | Teensy pin | Carrier net |
 | -------------- | ---------- | ----------- |
 | 3rd-element STEP | 6        | Z STEP      |
 | 3rd-element DIR  | 7        | Z DIR       |
 | 3rd-element EN   | 39       | Z ENABLE    |
-| 3rd-axis end-stop | 22      | Z LIMIT     |
+| 3rd-axis home+max | 22      | Z LIMIT     |
 | 3rd-axis driver PED *(§2.2)* | 15 | PROBE |
 
-K1 / K2 are L-Match-only (the selector relay is unused in symmetric
-T/Pi topologies). K3 (bypass) is retained per
-[CLAUDE.md](../CLAUDE.md) invariant 2.
+K1 / K2 are Balanced-L-only (the Balanced Pi needs no side selector).
+K3 (bypass) is retained per [CLAUDE.md](../CLAUDE.md) invariant 2.
 
 ## 8 · Sourcing & licensing note
 
